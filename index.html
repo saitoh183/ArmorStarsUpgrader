@@ -362,6 +362,12 @@
       </div>
 
       <div class="panel span-12">
+        <h2>Owned Key Gear Blueprints</h2>
+        <p class="muted">Only owned key gear blueprints can be used as key-gear conversion and 60 XP matching destinations.</p>
+        <div class="owned-grid" id="ownedKeyGearBlueprints"></div>
+      </div>
+
+      <div class="panel span-12">
         <h2>General Fragments</h2>
         <div class="table-wrap">
           <table id="generalTable">
@@ -515,6 +521,7 @@
         discard: $("discardPartialOnConvert"),
         targetPiece: $("targetPiece"),
         ownedBlueprints: $("ownedBlueprints"),
+        ownedKeyGearBlueprints: $("ownedKeyGearBlueprints"),
         generalBody: document.querySelector("#generalTable tbody"),
         legendaryBody: document.querySelector("#legendaryTable tbody"),
         keyBody: document.querySelector("#keyGearTable tbody"),
@@ -566,6 +573,10 @@
             acc[set.name] = index < 4;
             return acc;
           }, {}),
+          ownedKeyGearBlueprints: KEY_GEAR.reduce((acc, item) => {
+            acc[item.name] = false;
+            return acc;
+          }, {}),
           general: CATEGORIES.reduce((acc, category) => {
             acc[category] = { epic: 0, fine: 0, common: 0 };
             return acc;
@@ -583,6 +594,7 @@
           next.general[category] = { ...base.general[category], ...(incoming?.general?.[category] || {}) };
         });
         next.ownedBlueprints = { ...base.ownedBlueprints, ...(incoming?.ownedBlueprints || {}) };
+        next.ownedKeyGearBlueprints = { ...base.ownedKeyGearBlueprints, ...(incoming?.ownedKeyGearBlueprints || {}) };
         next.legendaryRows = Array.isArray(incoming?.legendaryRows) && incoming.legendaryRows.length
           ? incoming.legendaryRows.map(row => ({ id: row.id || uid(), setName: ARMOR_CATEGORY[row.setName] ? row.setName : ARMOR_SETS[0].name, count: num(row.count) }))
           : base.legendaryRows;
@@ -613,7 +625,7 @@
       }
 
       function renderTopSelectors() {
-        const options = ALL_PIECES.map(piece => `<option value="${esc(piece.name)}">${esc(piece.name)} (${esc(piece.category)}${piece.type === "set" ? ", Set" : ", Key Gear"})</option>`).join("");
+        const options = getOwnedPieceNames().map(piece => `<option value="${esc(piece.name)}">${esc(piece.name)} (${esc(piece.category)}${piece.type === "set" ? ", Set" : ", Key Gear"})</option>`).join("");
         dom.currentPiece.innerHTML = options;
         dom.targetPiece.innerHTML = options;
         dom.currentStar.innerHTML = [1, 2, 3, 4, 5].map(star => `<option value="${star}">${star}★</option>`).join("");
@@ -632,6 +644,29 @@
             <span><strong>${esc(set.name)}</strong><br><span class="muted">${esc(set.category)}</span></span>
           </label>
         `).join("");
+      }
+
+      function renderOwnedKeyGearBlueprints() {
+        dom.ownedKeyGearBlueprints.innerHTML = KEY_GEAR.map(item => `
+          <label class="owned-card">
+            <input type="checkbox" data-owned-key="${esc(item.name)}" ${state.ownedKeyGearBlueprints[item.name] ? "checked" : ""}>
+            <span><strong>${esc(item.name)}</strong><br><span class="muted">${esc(item.category)}</span></span>
+          </label>
+        `).join("");
+      }
+
+      function getOwnedPieceNames() {
+        const options = new Map();
+        ARMOR_SETS.forEach(set => {
+          if (state.ownedBlueprints[set.name]) options.set(set.name, { ...set, type: "set" });
+        });
+        KEY_GEAR.forEach(item => {
+          if (state.ownedKeyGearBlueprints[item.name]) options.set(item.name, { ...item, type: "key" });
+        });
+        [state.currentPiece, state.targetPiece].forEach(name => {
+          if (PIECE_META[name]) options.set(name, PIECE_META[name]);
+        });
+        return Array.from(options.values()).sort((a, b) => a.name.localeCompare(b.name));
       }
 
       function renderGeneralTable() {
@@ -739,6 +774,7 @@
       function renderAll() {
         renderTopSelectors();
         renderOwnedBlueprints();
+        renderOwnedKeyGearBlueprints();
         renderGeneralTable();
         renderLegendaryTable();
         renderKeyGearTable();
@@ -776,8 +812,9 @@
         return [general, legendary, keyGear].join("#");
       }
 
-      function waypointOptions(owned, currentPiece, targetPiece) {
-        const options = new Set(ARMOR_SETS.filter(set => owned[set.name]).map(set => set.name));
+      function waypointOptions(ownedArmor, ownedKeyGear, currentPiece, targetPiece) {
+        const options = new Set(ARMOR_SETS.filter(set => ownedArmor[set.name]).map(set => set.name));
+        KEY_GEAR.filter(item => ownedKeyGear[item.name]).forEach(item => options.add(item.name));
         options.add(currentPiece);
         options.add(targetPiece);
         return Array.from(options);
@@ -962,8 +999,9 @@
 
       function canStandOnPiece(candidatePiece, node, targetPiece) {
         if (candidatePiece === node.piece) return true;
+        if (candidatePiece === node.currentPiece) return true;
         if (pieceType(candidatePiece) === "set") return !!node.ownedBlueprints[candidatePiece];
-        if (pieceType(candidatePiece) === "key") return candidatePiece === targetPiece;
+        if (pieceType(candidatePiece) === "key") return !!node.ownedKeyGearBlueprints[candidatePiece];
         return false;
       }
 
@@ -971,7 +1009,7 @@
         if (node.star >= 6) return { ...node, finalPiece: node.piece, partialXp: 0 };
 
         const requirement = STAR_COSTS[node.star];
-        const candidates = waypointOptions(node.ownedBlueprints, node.piece, targetPiece);
+        const candidates = waypointOptions(node.ownedBlueprints, node.ownedKeyGearBlueprints, node.piece, targetPiece);
         let best = { piece: node.piece, partialXp: 0 };
 
         candidates.forEach(candidatePiece => {
@@ -1009,6 +1047,7 @@
           conversions: 0,
           warnings: [],
           ownedBlueprints: { ...input.ownedBlueprints },
+          ownedKeyGearBlueprints: { ...(input.ownedKeyGearBlueprints || {}) },
           lockedCurrent: !input.discardPartialOnConvert && input.currentXp > 0,
           targetBias: 0,
           finalPiece: input.currentPiece
@@ -1044,7 +1083,7 @@
           if (node.star >= 6) continue;
 
           const cost = STAR_COSTS[node.star];
-          const waypoints = waypointOptions(node.ownedBlueprints, node.piece, input.targetPiece);
+          const waypoints = waypointOptions(node.ownedBlueprints, node.ownedKeyGearBlueprints, node.piece, input.targetPiece);
 
           waypoints.forEach(nextPiece => {
             if (!canStandOnPiece(nextPiece, node, input.targetPiece)) return;
@@ -1151,13 +1190,85 @@
         if (input.currentStar < 1 || input.currentStar > 5) return "Current star must be between 1 and 5.";
         const limit = STAR_COSTS[input.currentStar];
         if (input.currentXp < 0 || input.currentXp >= limit) return `Current XP must be between 0 and ${limit - 1} for the selected star.`;
-        if (!Object.values(input.ownedBlueprints).some(Boolean)) return "Mark at least one owned armor set blueprint.";
+        if (!Object.values(input.ownedBlueprints).some(Boolean) && !Object.values(input.ownedKeyGearBlueprints || {}).some(Boolean)) {
+          return "Mark at least one owned armor set or key gear blueprint.";
+        }
         const hasFragments = CATEGORIES.some(category => {
           const row = input.general[category];
           return row.epic || row.fine || row.common;
         }) || input.legendaryRows.some(row => row.count > 0) || input.keyGearRows.some(row => row.count > 0) || input.currentXp > 0;
         if (!hasFragments) return "Enter fragment inventory or current partial XP before generating a path.";
         return null;
+      }
+
+      function validateGeneratedPlan(result, input) {
+        const errors = [];
+        if (!result?.best) {
+          errors.push("No best path was returned.");
+          return errors;
+        }
+
+        const inventory = buildInventory(input);
+        const ownedArmor = input.ownedBlueprints || {};
+        const ownedKeyGear = input.ownedKeyGearBlueprints || {};
+        const currentPiece = input.currentPiece;
+        let activePiece = currentPiece;
+        let countedConversions = 0;
+
+        result.best.steps.forEach(step => {
+          const stepPieceMatch = / on (.+)$/.exec(step.title || "");
+          const stepPiece = stepPieceMatch ? stepPieceMatch[1] : activePiece;
+
+          if (step.conversion) {
+            countedConversions += 1;
+            const conversionMatch = /^Convert (.+) -> (.+)$/.exec(step.conversion);
+            if (!conversionMatch) {
+              errors.push(`Malformed conversion text: ${step.conversion}`);
+            } else {
+              const destination = conversionMatch[2];
+              if (destination !== stepPiece) errors.push(`Conversion destination mismatch in ${step.title}.`);
+              if (pieceType(destination) === "set" && destination !== currentPiece && !ownedArmor[destination]) {
+                errors.push(`Unowned armor set conversion destination used: ${destination}`);
+              }
+              if (pieceType(destination) === "key" && destination !== currentPiece && !ownedKeyGear[destination]) {
+                errors.push(`Unowned key gear conversion destination used: ${destination}`);
+              }
+            }
+          }
+
+          ["common", "fine", "epic"].forEach(kind => {
+            const used = step.usage[kind] || 0;
+            if (used > inventory.general[step.category][kind]) errors.push(`${step.category} ${kind} inventory went negative.`);
+            inventory.general[step.category][kind] -= used;
+          });
+
+          step.usage.legendary.forEach(item => {
+            const remaining = inventory.legendary.find(entry => entry.name === item.name);
+            if (!remaining || remaining.count < item.count) errors.push(`Legendary inventory went negative on ${item.name}.`);
+            if (remaining) remaining.count -= item.count;
+            if (item.xpEach === 60 && (item.name !== stepPiece || pieceType(stepPiece) !== "set" || !ownedArmor[stepPiece])) {
+              errors.push(`Illegal 60 XP legendary use on ${item.name} while active piece was ${stepPiece}.`);
+            }
+          });
+
+          step.usage.keyGear.forEach(item => {
+            const remaining = inventory.keyGear.find(entry => entry.name === item.name);
+            if (!remaining || remaining.count < item.count) errors.push(`Key gear inventory went negative on ${item.name}.`);
+            if (remaining) remaining.count -= item.count;
+            if (item.xpEach === 60 && (item.name !== stepPiece || pieceType(stepPiece) !== "key" || !ownedKeyGear[stepPiece])) {
+              errors.push(`Illegal 60 XP key gear use on ${item.name} while active piece was ${stepPiece}.`);
+            }
+          });
+
+          activePiece = stepPiece;
+        });
+
+        const expectedConversions = result.best.conversions - ((result.best.finalPiece && result.best.finalPiece !== activePiece) ? 1 : 0);
+        if (countedConversions !== expectedConversions) {
+          errors.push(`Expected ${expectedConversions} path conversions, validated ${countedConversions}.`);
+        }
+
+        return errors;
       }
 
       function gatherInput() {
@@ -1437,6 +1548,20 @@
           }
           if (message.type === "done") {
             console.timeEnd("planner-total");
+            const resultErrors = validateGeneratedPlan(message.result, input);
+            if (resultErrors.length) {
+              setCalcState({
+                running: false,
+                status: "Validation failed",
+                detail: resultErrors[0],
+                progress: 100,
+                elapsedMs: message.result.durationMs || (performance.now() - runStartedAt)
+              });
+              showMessage("error", `Generated plan failed validation: ${resultErrors[0]}`);
+              activeWorker.terminate();
+              activeWorker = null;
+              return;
+            }
             renderResults(message.result, input);
             setCalcState({
               running: false,
@@ -1510,6 +1635,15 @@
           if (owned) {
             state.ownedBlueprints[owned] = event.target.checked;
             saveState();
+            renderTopSelectors();
+            return;
+          }
+
+          const ownedKey = event.target.getAttribute("data-owned-key");
+          if (ownedKey) {
+            state.ownedKeyGearBlueprints[ownedKey] = event.target.checked;
+            saveState();
+            renderTopSelectors();
             return;
           }
 
