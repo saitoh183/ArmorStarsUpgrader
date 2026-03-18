@@ -295,11 +295,19 @@
       <p>Plan legal armor-only star upgrade routes, including category-safe star jumps, conversion chains, match-value legendary usage, partial XP loss handling, and leftover fragment tracking in one place.</p>
       <div class="toolbar">
         <button class="btn-primary" id="generateBtn">Generate Path</button>
+        <button class="btn-danger" id="cancelBtn" disabled>Cancel</button>
         <button class="btn-muted" id="clearCurrentBtn">Clear Current Piece</button>
         <button class="btn-muted" id="clearFragmentsBtn">Clear Fragment Section</button>
         <button class="btn-muted" id="clearLegendaryBtn">Clear Legendary Set Section</button>
         <button class="btn-muted" id="clearKeyGearBtn">Clear Key Gear Section</button>
         <button class="btn-danger" id="clearAllBtn">Clear All</button>
+      </div>
+      <div class="step" id="calcBox" style="margin-top:16px;background:#fff8ef;">
+        <p style="margin:0 0 8px;"><strong id="calcStatus">Idle</strong> <span class="muted" id="calcTiming">0 ms</span></p>
+        <div style="height:10px;background:#e8dcc8;border-radius:999px;overflow:hidden;">
+          <div id="calcProgress" style="width:0%;height:100%;background:linear-gradient(90deg,#ac4b2a,#214e63);"></div>
+        </div>
+        <p class="muted" id="calcDetail" style="margin:8px 0 0;">Worker search is ready.</p>
       </div>
       <div class="preset-bar">
         <button class="btn-secondary" data-preset="balanced">Load Demo: Balanced</button>
@@ -512,7 +520,13 @@
         keyBody: document.querySelector("#keyGearTable tbody"),
         resultsArea: $("resultsArea"),
         messageArea: $("messageArea"),
-        importExportArea: $("importExportArea")
+        importExportArea: $("importExportArea"),
+        generateBtn: $("generateBtn"),
+        cancelBtn: $("cancelBtn"),
+        calcStatus: $("calcStatus"),
+        calcTiming: $("calcTiming"),
+        calcProgress: $("calcProgress"),
+        calcDetail: $("calcDetail")
       };
 
       const esc = value => String(value)
@@ -529,6 +543,17 @@
       const uid = () => "row-" + Math.random().toString(36).slice(2, 10);
       const pieceCategory = name => PIECE_META[name]?.category || "";
       const pieceType = name => PIECE_META[name]?.type || "";
+      let activeWorker = null;
+      let runStartedAt = 0;
+
+      function setCalcState({ running, status, detail, progress, elapsedMs }) {
+        dom.generateBtn.disabled = !!running;
+        dom.cancelBtn.disabled = !running;
+        if (typeof status === "string") dom.calcStatus.textContent = status;
+        if (typeof detail === "string") dom.calcDetail.textContent = detail;
+        if (typeof progress === "number") dom.calcProgress.style.width = `${Math.max(0, Math.min(100, progress))}%`;
+        if (typeof elapsedMs === "number") dom.calcTiming.textContent = `${elapsedMs.toFixed(0)} ms`;
+      }
 
       function blankState() {
         return {
@@ -614,26 +639,42 @@
           const row = state.general[category];
           const total = row.epic * 10 + row.fine * 3 + row.common;
           return `
-            <tr>
+            <tr data-category="${esc(category)}">
               <td><strong>${esc(category)}</strong></td>
               <td><input type="number" min="0" data-general="${esc(category)}|epic" value="${row.epic}"></td>
               <td><input type="number" min="0" data-general="${esc(category)}|fine" value="${row.fine}"></td>
               <td><input type="number" min="0" data-general="${esc(category)}|common" value="${row.common}"></td>
-              <td>${row.epic * 10}</td>
-              <td>${row.fine * 3}</td>
-              <td>${row.common}</td>
-              <td><strong>${total}</strong></td>
+              <td data-role="epic-xp">${row.epic * 10}</td>
+              <td data-role="fine-xp">${row.fine * 3}</td>
+              <td data-role="common-xp">${row.common}</td>
+              <td><strong data-role="total-xp">${total}</strong></td>
               <td><button class="btn-muted btn-small" data-clear-general="${esc(category)}">Clear</button></td>
             </tr>
           `;
         }).join("");
       }
 
+      function updateGeneralRow(category, syncInputs) {
+        const row = state.general[category];
+        const tr = dom.generalBody.querySelector(`tr[data-category="${category}"]`);
+        if (!tr) return;
+        const inputs = tr.querySelectorAll("input");
+        if (syncInputs) {
+          inputs[0].value = row.epic;
+          inputs[1].value = row.fine;
+          inputs[2].value = row.common;
+        }
+        tr.querySelector('[data-role="epic-xp"]').textContent = row.epic * 10;
+        tr.querySelector('[data-role="fine-xp"]').textContent = row.fine * 3;
+        tr.querySelector('[data-role="common-xp"]').textContent = row.common;
+        tr.querySelector('[data-role="total-xp"]').textContent = row.epic * 10 + row.fine * 3 + row.common;
+      }
+
       function renderLegendaryTable() {
         dom.legendaryBody.innerHTML = state.legendaryRows.map(row => {
           const category = ARMOR_CATEGORY[row.setName];
           return `
-            <tr>
+            <tr data-row-id="${esc(row.id)}">
               <td>
                 <select data-legendary-set="${esc(row.id)}">
                   ${ARMOR_SETS.map(set => `<option value="${esc(set.name)}" ${set.name === row.setName ? "selected" : ""}>${esc(set.name)}</option>`).join("")}
@@ -642,18 +683,31 @@
               <td><input readonly value="${esc(category)}"></td>
               <td><input type="number" min="0" data-legendary-count="${esc(row.id)}" value="${row.count}"></td>
               <td><span class="pill">30 / 60</span></td>
-              <td class="muted">60 on ${esc(row.setName)}, otherwise 30 in ${esc(category)}</td>
+              <td class="muted" data-role="legend-note">60 on ${esc(row.setName)}, otherwise 30 in ${esc(category)}</td>
               <td><button class="btn-muted btn-small" data-clear-legendary="${esc(row.id)}">Clear</button></td>
             </tr>
           `;
         }).join("");
       }
 
+      function updateLegendaryRow(rowId, syncInputs) {
+        const row = state.legendaryRows.find(item => item.id === rowId);
+        const tr = dom.legendaryBody.querySelector(`tr[data-row-id="${rowId}"]`);
+        if (!row || !tr) return;
+        const category = ARMOR_CATEGORY[row.setName];
+        if (syncInputs) {
+          tr.querySelector("select").value = row.setName;
+          tr.querySelector('input[type="number"]').value = row.count;
+        }
+        tr.querySelector('input[readonly]').value = category;
+        tr.querySelector('[data-role="legend-note"]').textContent = `60 on ${row.setName}, otherwise 30 in ${category}`;
+      }
+
       function renderKeyGearTable() {
         dom.keyBody.innerHTML = state.keyGearRows.map(row => {
           const category = KEY_CATEGORY[row.keyName];
           return `
-            <tr>
+            <tr data-row-id="${esc(row.id)}">
               <td>
                 <select data-key-name="${esc(row.id)}">
                   ${KEY_GEAR.map(item => `<option value="${esc(item.name)}" ${item.name === row.keyName ? "selected" : ""}>${esc(item.name)}</option>`).join("")}
@@ -662,11 +716,24 @@
               <td><input readonly value="${esc(category)}"></td>
               <td><input type="number" min="0" data-key-count="${esc(row.id)}" value="${row.count}"></td>
               <td><span class="pill">30 / 60</span></td>
-              <td class="muted">60 on exact ${esc(row.keyName)}, otherwise 30 in ${esc(category)}</td>
+              <td class="muted" data-role="key-note">60 on exact ${esc(row.keyName)}, otherwise 30 in ${esc(category)}</td>
               <td><button class="btn-muted btn-small" data-clear-key="${esc(row.id)}">Clear</button></td>
             </tr>
           `;
         }).join("");
+      }
+
+      function updateKeyRow(rowId, syncInputs) {
+        const row = state.keyGearRows.find(item => item.id === rowId);
+        const tr = dom.keyBody.querySelector(`tr[data-row-id="${rowId}"]`);
+        if (!row || !tr) return;
+        const category = KEY_CATEGORY[row.keyName];
+        if (syncInputs) {
+          tr.querySelector("select").value = row.keyName;
+          tr.querySelector('input[type="number"]').value = row.count;
+        }
+        tr.querySelector('input[readonly]').value = category;
+        tr.querySelector('[data-role="key-note"]').textContent = `60 on exact ${row.keyName}, otherwise 30 in ${category}`;
       }
 
       function renderAll() {
@@ -769,76 +836,76 @@
         const sources = fragmentSources(inventory, category, activePiece);
         if (!sources.length) return null;
 
-        const maxValue = Math.max(...sources.map(src => src.value));
-        const limit = requiredXp + maxValue * 2;
-        let states = new Map([[0, { xp: 0, picks: {}, fragments: 0, preserve: 0, order: [] }]]);
+        const limit = requiredXp + 60;
+        const pseudoItems = [];
+        sources.forEach((source, sourceIndex) => {
+          let remaining = Math.min(source.count, Math.ceil(limit / source.value) + 1);
+          let chunk = 1;
+          while (remaining > 0) {
+            const used = Math.min(chunk, remaining);
+            pseudoItems.push({
+              sourceIndex,
+              count: used,
+              xp: used * source.value,
+              preserve: used * source.preserveRank,
+              fragments: used,
+              order: used * source.spendRank
+            });
+            remaining -= used;
+            chunk *= 2;
+          }
+        });
 
-        function better(a, b) {
-          if (!b) return true;
-          if (a.fragments !== b.fragments) return a.fragments < b.fragments;
-          if (a.preserve !== b.preserve) return a.preserve < b.preserve;
-          return lexLess(a.order, b.order);
+        const dp = new Array(limit + 1).fill(null);
+        dp[0] = { prev: -1, itemIndex: -1, preserve: 0, fragments: 0, order: 0 };
+
+        const better = (a, b) => !b || a.preserve < b.preserve || (a.preserve === b.preserve && (a.fragments < b.fragments || (a.fragments === b.fragments && a.order < b.order)));
+
+        pseudoItems.forEach((item, itemIndex) => {
+          for (let xp = limit; xp >= item.xp; xp -= 1) {
+            const prev = dp[xp - item.xp];
+            if (!prev) continue;
+            const candidate = {
+              prev: xp - item.xp,
+              itemIndex,
+              preserve: prev.preserve + item.preserve,
+              fragments: prev.fragments + item.fragments,
+              order: prev.order + item.order
+            };
+            if (better(candidate, dp[xp])) dp[xp] = candidate;
+          }
+        });
+
+        let bestXp = -1;
+        let bestMeta = null;
+        for (let xp = requiredXp; xp <= limit; xp += 1) {
+          if (!dp[xp]) continue;
+          const waste = xp - requiredXp;
+          if (!bestMeta || waste < bestMeta.waste || (waste === bestMeta.waste && better(dp[xp], bestMeta.meta))) {
+            bestXp = xp;
+            bestMeta = { waste, meta: dp[xp] };
+          }
         }
+        if (bestXp < 0) return null;
 
-        sources.forEach((source, index) => {
-          const next = new Map(states);
-          states.forEach(prev => {
-            for (let used = 1; used <= source.count; used += 1) {
-              const xp = prev.xp + used * source.value;
-              if (xp > limit) break;
-              const candidate = {
-                xp,
-                picks: { ...prev.picks, [source.id]: used + (prev.picks[source.id] || 0) },
-                fragments: prev.fragments + used,
-                preserve: prev.preserve + used * source.preserveRank,
-                order: [...prev.order]
-              };
-              candidate.order[index] = (candidate.order[index] || 0) + used;
-              const existing = next.get(xp);
-              if (better(candidate, existing)) next.set(xp, candidate);
-            }
-          });
-          states = next;
-        });
-
-        let best = null;
-        states.forEach(candidate => {
-          if (candidate.xp < requiredXp) return;
-          const scored = { ...candidate, waste: candidate.xp - requiredXp };
-          if (!best) {
-            best = scored;
-            return;
-          }
-          if (scored.waste !== best.waste) {
-            if (scored.waste < best.waste) best = scored;
-            return;
-          }
-          if (scored.preserve !== best.preserve) {
-            if (scored.preserve < best.preserve) best = scored;
-            return;
-          }
-          if (scored.fragments !== best.fragments) {
-            if (scored.fragments < best.fragments) best = scored;
-            return;
-          }
-          if (lexLess(scored.order, best.order)) best = scored;
-        });
-
-        if (!best) return null;
+        const picked = new Array(sources.length).fill(0);
+        let cursor = bestXp;
+        while (cursor > 0) {
+          const entry = dp[cursor];
+          const item = pseudoItems[entry.itemIndex];
+          picked[item.sourceIndex] += item.count;
+          cursor = entry.prev;
+        }
 
         const nextInventory = clone(inventory);
         const usage = { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] };
-
-        sources.forEach(source => {
-          const used = best.picks[source.id] || 0;
+        sources.forEach((source, sourceIndex) => {
+          const used = picked[sourceIndex] || 0;
           if (!used) return;
           if (source.kind === "general") {
-            if (source.label === "Common") nextInventory.general[category].common -= used;
-            if (source.label === "Fine") nextInventory.general[category].fine -= used;
-            if (source.label === "Epic") nextInventory.general[category].epic -= used;
-            if (source.label === "Common") usage.common += used;
-            if (source.label === "Fine") usage.fine += used;
-            if (source.label === "Epic") usage.epic += used;
+            if (source.label === "Common") nextInventory.general[category].common -= used, usage.common += used;
+            if (source.label === "Fine") nextInventory.general[category].fine -= used, usage.fine += used;
+            if (source.label === "Epic") nextInventory.general[category].epic -= used, usage.epic += used;
           } else if (source.kind === "legendary") {
             const item = nextInventory.legendary.find(entry => `legendary:${entry.id}` === source.id);
             if (item) item.count -= used;
@@ -856,11 +923,11 @@
         return {
           nextInventory,
           usage,
-          spentXp: best.xp,
-          waste: best.waste,
-          why: best.waste === 0
+          spentXp: bestXp,
+          waste: bestMeta.waste,
+          why: bestMeta.waste === 0
             ? `${label} hit the exact threshold while preserving stronger match-value fragments where possible.`
-            : `${label} needed ${best.waste} wasted XP because no exact legal threshold combination existed.`
+            : `${label} needed ${bestMeta.waste} wasted XP because no exact legal threshold combination existed.`
         };
       }
 
@@ -926,7 +993,11 @@
         return { ...node, finalPiece: best.piece, partialXp: best.partialXp, conversions, warnings };
       }
 
-      function searchBestPath(input) {
+      function searchBestPath(input, options = {}) {
+        const maxStates = options.maxStates || 6000;
+        const deadline = performance.now() + (options.maxMs || 2500);
+        const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+        const startedAt = performance.now();
         const start = {
           piece: input.currentPiece,
           currentPiece: input.currentPiece,
@@ -947,9 +1018,20 @@
         const alternatives = [];
         const stack = [start];
         const seen = new Map();
+        let expandedStates = 0;
+        let truncated = false;
 
         while (stack.length) {
-          const node = stack.pop();
+          if (expandedStates >= maxStates || performance.now() > deadline) {
+            truncated = true;
+            break;
+          }
+          stack.sort((a, b) => compareNode(nodeScore(b), nodeScore(a)));
+          const node = stack.shift();
+          expandedStates += 1;
+          if (onProgress && expandedStates % 25 === 0) {
+            onProgress({ progress: Math.min(95, Math.round((expandedStates / maxStates) * 100)), detail: `Expanded ${expandedStates} states...` });
+          }
           const finished = finishNode(node, input.targetPiece);
 
           if (compareNode(nodeScore(finished), nodeScore(best)) > 0) {
@@ -1056,7 +1138,10 @@
 
         return {
           best,
-          alternatives: deduped.filter(node => compareNode(nodeScore(node), nodeScore(best)) < 0).slice(0, 3)
+          alternatives: deduped.filter(node => compareNode(nodeScore(node), nodeScore(best)) < 0).slice(0, 3),
+          truncated,
+          expandedStates,
+          durationMs: performance.now() - startedAt
         };
       }
 
@@ -1245,21 +1330,25 @@
       function clearGeneralSection() {
         CATEGORIES.forEach(category => {
           state.general[category] = { epic: 0, fine: 0, common: 0 };
+          updateGeneralRow(category, true);
         });
         saveState();
-        renderGeneralTable();
       }
 
       function clearLegendarySection() {
-        state.legendaryRows = [{ id: uid(), setName: ARMOR_SETS[0].name, count: 0 }];
+        state.legendaryRows.forEach(row => {
+          row.count = 0;
+          updateLegendaryRow(row.id, true);
+        });
         saveState();
-        renderLegendaryTable();
       }
 
       function clearKeySection() {
-        state.keyGearRows = [{ id: uid(), keyName: KEY_GEAR[0].name, count: 0 }];
+        state.keyGearRows.forEach(row => {
+          row.count = 0;
+          updateKeyRow(row.id, true);
+        });
         saveState();
-        renderKeyGearTable();
       }
 
       function clearAll() {
@@ -1285,6 +1374,92 @@
         } catch {
           showMessage("error", "Import failed. Paste valid planner JSON.");
         }
+      }
+
+      function createWorker() {
+        const source = `
+          const CATEGORIES = ${JSON.stringify(CATEGORIES)};
+          const STAR_COSTS = ${JSON.stringify(STAR_COSTS)};
+          const ARMOR_SETS = ${JSON.stringify(ARMOR_SETS)};
+          const KEY_GEAR = ${JSON.stringify(KEY_GEAR)};
+          const ALL_PIECES = ${JSON.stringify(ALL_PIECES)};
+          const ARMOR_CATEGORY = ${JSON.stringify(ARMOR_CATEGORY)};
+          const KEY_CATEGORY = ${JSON.stringify(KEY_CATEGORY)};
+          const PIECE_META = ${JSON.stringify(PIECE_META)};
+          const clone = value => JSON.parse(JSON.stringify(value));
+          const num = value => { const n = Number(value); return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0; };
+          const pieceCategory = name => PIECE_META[name]?.category || "";
+          const pieceType = name => PIECE_META[name]?.type || "";
+          ${buildInventory.toString()}
+          ${inventoryKey.toString()}
+          ${waypointOptions.toString()}
+          ${fragmentSources.toString()}
+          ${categoryPotential.toString()}
+          ${spendForThreshold.toString()}
+          ${usageText.toString()}
+          ${nodeScore.toString()}
+          ${compareNode.toString()}
+          ${canStandOnPiece.toString()}
+          ${finishNode.toString()}
+          ${searchBestPath.toString()}
+          self.onmessage = event => {
+            const payload = event.data;
+            const result = searchBestPath(payload.input, {
+              maxStates: payload.options.maxStates,
+              maxMs: payload.options.maxMs,
+              onProgress: info => self.postMessage({ type: "progress", ...info })
+            });
+            self.postMessage({ type: "done", result });
+          };
+        `;
+        return new Worker(URL.createObjectURL(new Blob([source], { type: "application/javascript" })));
+      }
+
+      function startGenerate() {
+        clearMessage();
+        const input = gatherInput();
+        const error = validateInput(input);
+        if (error) {
+          showMessage("error", error);
+          return;
+        }
+        if (activeWorker) activeWorker.terminate();
+        activeWorker = createWorker();
+        runStartedAt = performance.now();
+        console.time("planner-total");
+        console.log("[planner] starting worker search");
+        setCalcState({ running: true, status: "Calculating...", detail: "Starting worker search...", progress: 2, elapsedMs: 0 });
+        activeWorker.onmessage = event => {
+          const message = event.data;
+          if (message.type === "progress") {
+            setCalcState({ running: true, status: "Calculating...", detail: message.detail || "Searching...", progress: message.progress ?? 50, elapsedMs: performance.now() - runStartedAt });
+            return;
+          }
+          if (message.type === "done") {
+            console.timeEnd("planner-total");
+            renderResults(message.result, input);
+            setCalcState({
+              running: false,
+              status: message.result.truncated ? "Best result found before search cap" : "Calculation complete",
+              detail: `Expanded ${message.result.expandedStates} states.`,
+              progress: 100,
+              elapsedMs: message.result.durationMs || (performance.now() - runStartedAt)
+            });
+            showMessage(message.result.truncated ? "warn" : "info", message.result.truncated ? "Search limit reached. Showing the best path found so far." : "Generated best legal path.");
+            activeWorker.terminate();
+            activeWorker = null;
+          }
+        };
+        activeWorker.postMessage({ input, options: { maxStates: 6000, maxMs: 2500 } });
+      }
+
+      function cancelGenerate() {
+        if (!activeWorker) return;
+        activeWorker.terminate();
+        activeWorker = null;
+        console.timeEnd("planner-total");
+        setCalcState({ running: false, status: "Canceled", detail: "Calculation canceled by user.", progress: 0, elapsedMs: performance.now() - runStartedAt });
+        showMessage("warn", "Calculation canceled.");
       }
 
       function bindEvents() {
@@ -1314,18 +1489,8 @@
         $("exportBtn").addEventListener("click", exportJson);
         $("importBtn").addEventListener("click", importJson);
 
-        $("generateBtn").addEventListener("click", () => {
-          clearMessage();
-          const input = gatherInput();
-          const error = validateInput(input);
-          if (error) {
-            showMessage("error", error);
-            return;
-          }
-          const result = searchBestPath(input);
-          renderResults(result, input);
-          showMessage("info", "Generated best legal path.");
-        });
+        $("generateBtn").addEventListener("click", startGenerate);
+        $("cancelBtn").addEventListener("click", cancelGenerate);
 
         document.querySelectorAll("[data-preset]").forEach(button => {
           button.addEventListener("click", () => setPreset(button.getAttribute("data-preset")));
@@ -1337,7 +1502,7 @@
             const [category, field] = general.split("|");
             state.general[category][field] = num(event.target.value);
             saveState();
-            renderGeneralTable();
+            updateGeneralRow(category, false);
             return;
           }
 
@@ -1370,7 +1535,7 @@
             const row = state.legendaryRows.find(item => item.id === legendarySet);
             if (row) row.setName = event.target.value;
             saveState();
-            renderLegendaryTable();
+            updateLegendaryRow(legendarySet, false);
             return;
           }
 
@@ -1379,7 +1544,7 @@
             const row = state.keyGearRows.find(item => item.id === keyName);
             if (row) row.keyName = event.target.value;
             saveState();
-            renderKeyGearTable();
+            updateKeyRow(keyName, false);
           }
         });
 
@@ -1388,7 +1553,7 @@
           if (clearGeneral) {
             state.general[clearGeneral] = { epic: 0, fine: 0, common: 0 };
             saveState();
-            renderGeneralTable();
+            updateGeneralRow(clearGeneral, true);
             return;
           }
 
@@ -1397,7 +1562,7 @@
             const row = state.legendaryRows.find(item => item.id === clearLegendary);
             if (row) row.count = 0;
             saveState();
-            renderLegendaryTable();
+            updateLegendaryRow(clearLegendary, true);
             return;
           }
 
@@ -1406,12 +1571,13 @@
             const row = state.keyGearRows.find(item => item.id === clearKey);
             if (row) row.count = 0;
             saveState();
-            renderKeyGearTable();
+            updateKeyRow(clearKey, true);
           }
         });
       }
 
       renderAll();
+      setCalcState({ running: false, status: "Idle", detail: "Worker search is ready.", progress: 0, elapsedMs: 0 });
       bindEvents();
     })();
   </script>
