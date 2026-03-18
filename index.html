@@ -1881,6 +1881,309 @@
         `;
       }
 
+      function replayRouteCandidate(candidate, input) {
+        // Regression guard: replay from the original inventory so spent fragments cannot be
+        // reused by later steps, and exact 30/60 XP matching is re-checked authoritatively.
+        const inventory = buildInventory(input);
+        const ownedArmor = input.ownedBlueprints || {};
+        const ownedKeyGear = input.ownedKeyGearBlueprints || {};
+        const errors = [];
+        const stepReports = [];
+        let activePiece = input.currentPiece;
+        let activeStar = input.currentStar;
+        let activePartial = input.currentXp;
+        let conversionsUsed = 0;
+
+        const snapshot = inv => ({
+          general: clone(inv.general),
+          legendary: inv.legendary.map(item => ({ name: item.name, count: item.count })),
+          keyGear: inv.keyGear.map(item => ({ name: item.name, count: item.count }))
+        });
+
+        const deductItemList = (list, name, count, label) => {
+          const item = list.find(entry => entry.name === name);
+          if (!item || item.count < count) {
+            errors.push(`${label} inventory went negative on ${name}.`);
+            return;
+          }
+          item.count -= count;
+        };
+
+        candidate.steps.forEach(step => {
+          const before = snapshot(inventory);
+          if (step.currentPiece !== activePiece) {
+            errors.push(`Step current piece mismatch. Expected ${activePiece}, found ${step.currentPiece}.`);
+          }
+
+          if (step.conversion) {
+            conversionsUsed += 1;
+            if (conversionsUsed > input.conversionAttemptsAvailable) errors.push("Conversion attempt overflow.");
+            if (!isOwnedPiece(step.destinationPiece, ownedArmor, ownedKeyGear, input.currentPiece)) {
+              errors.push(`Unowned conversion destination used: ${step.destinationPiece}`);
+            }
+            activePiece = step.destinationPiece;
+            activePartial = 0;
+          } else if (step.destinationPiece !== activePiece) {
+            errors.push(`Destination mismatch without conversion on ${step.title}.`);
+          }
+
+          if (step.category !== pieceCategory(activePiece)) {
+            errors.push(`Category mismatch on ${step.title}. Expected ${pieceCategory(activePiece)}, found ${step.category}.`);
+          }
+
+          let replaySpentXp = 0;
+          ["common", "fine", "epic"].forEach(kind => {
+            const used = step.usage[kind] || 0;
+            const value = kind === "common" ? 1 : kind === "fine" ? 3 : 10;
+            if (used > inventory.general[step.category][kind]) errors.push(`${step.category} ${kind} inventory went negative.`);
+            inventory.general[step.category][kind] -= used;
+            replaySpentXp += used * value;
+          });
+
+          step.usage.legendary.forEach(item => {
+            deductItemList(inventory.legendary, item.name, item.count, "Legendary");
+            const expectedXp = item.name === activePiece && pieceType(activePiece) === "set" && ownedArmor[activePiece] ? 60 : 30;
+            if (item.xpEach !== expectedXp) {
+              errors.push(`Incorrect legendary XP for ${item.name} on ${activePiece}. Expected ${expectedXp}, found ${item.xpEach}.`);
+            }
+            replaySpentXp += item.count * item.xpEach;
+          });
+
+          step.usage.keyGear.forEach(item => {
+            deductItemList(inventory.keyGear, item.name, item.count, "Key gear");
+            const expectedXp = item.name === activePiece && pieceType(activePiece) === "key" && ownedKeyGear[activePiece] ? 60 : 30;
+            if (item.xpEach !== expectedXp) {
+              errors.push(`Incorrect key gear XP for ${item.name} on ${activePiece}. Expected ${expectedXp}, found ${item.xpEach}.`);
+            }
+            replaySpentXp += item.count * item.xpEach;
+          });
+
+          if (replaySpentXp !== step.spentXp) {
+            errors.push(`XP mismatch on ${step.title}. Expected ${step.spentXp}, replayed ${replaySpentXp}.`);
+          }
+
+          if (step.progressOnly) {
+            const cap = activeStar >= 6 ? 0 : STAR_COSTS[activeStar] - 1;
+            if (replaySpentXp > cap) errors.push(`Progress step exceeded the next threshold cap on ${step.title}.`);
+            activePartial = replaySpentXp;
+          } else {
+            const required = STAR_COSTS[activeStar] - activePartial;
+            if (replaySpentXp < required) errors.push(`Star jump did not meet required XP on ${step.title}.`);
+            activeStar += 1;
+            activePartial = 0;
+          }
+
+          const after = snapshot(inventory);
+          stepReports.push({ ...step, inventoryBefore: before, inventoryAfter: after, replaySpentXp });
+        });
+
+        if (activePiece !== candidate.finalPiece) errors.push(`Final piece mismatch. Expected ${candidate.finalPiece}, replayed ${activePiece}.`);
+        if (activeStar !== candidate.star) errors.push(`Final star mismatch. Expected ${candidate.star}, replayed ${activeStar}.`);
+        if (activePartial !== candidate.partialXp) errors.push(`Final partial XP mismatch. Expected ${candidate.partialXp}, replayed ${activePartial}.`);
+        if (candidate.finalPiece !== input.targetPiece) errors.push("Ending on the wrong piece.");
+        if (conversionsUsed !== candidate.conversions) errors.push(`Conversion count mismatch. Expected ${candidate.conversions}, replayed ${conversionsUsed}.`);
+
+        return {
+          valid: errors.length === 0,
+          errors,
+          steps: stepReports,
+          finalInventory: inventory,
+          finalPiece: activePiece,
+          finalStar: activeStar,
+          finalPartialXp: activePartial,
+          conversionsUsed
+        };
+      }
+
+      function validateGeneratedPlan(result, input) {
+        if (!result?.best) return ["No best path was returned."];
+        return replayRouteCandidate(result.best, input).errors;
+      }
+
+      function searchBestPath(input, options = {}) {
+        const maxStates = options.maxStates || 7000;
+        const deadline = performance.now() + (options.maxMs || 3000);
+        const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+        const startedAt = performance.now();
+        const start = {
+          piece: input.currentPiece,
+          currentPiece: input.currentPiece,
+          star: input.currentStar,
+          partialXp: input.currentXp,
+          inventory: buildInventory(input),
+          steps: [],
+          totalWaste: 0,
+          conversions: 0,
+          warnings: [],
+          ownedBlueprints: { ...input.ownedBlueprints },
+          ownedKeyGearBlueprints: { ...(input.ownedKeyGearBlueprints || {}) },
+          lockedCurrent: !input.discardPartialOnConvert && input.currentXp > 0,
+          finalPiece: input.currentPiece
+        };
+
+        let best = null;
+        let bestOverall = null;
+        const alternatives = [];
+        const rejectedCandidates = [];
+        const queue = [start];
+        const seen = new Map();
+        let expandedStates = 0;
+        let truncated = false;
+
+        const considerCandidate = (candidate, isTarget) => {
+          if (!candidate) return null;
+          // Validation is the gate before ranking: invalid routes never enter the scoring pool.
+          const replay = replayRouteCandidate(candidate, input);
+          if (!replay.valid) {
+            if (rejectedCandidates.length < 12) {
+              rejectedCandidates.push({
+                finalPiece: candidate.finalPiece,
+                star: candidate.star,
+                partialXp: candidate.partialXp,
+                reason: replay.errors[0]
+              });
+            }
+            return null;
+          }
+          candidate.routeValidated = true;
+          candidate.validationErrors = [];
+          candidate.validation = replay;
+          candidate.inventory = replay.finalInventory;
+          if (isTarget) {
+            if (!best || compareFinalResults(candidate, best, input.targetPiece) > 0) {
+              if (best) alternatives.push(best);
+              best = candidate;
+            } else if (compareFinalResults(candidate, best, input.targetPiece) >= -1) {
+              alternatives.push(candidate);
+            }
+          } else if (!bestOverall || candidate.star > bestOverall.star || (candidate.star === bestOverall.star && candidate.partialXp > bestOverall.partialXp)) {
+            bestOverall = candidate;
+          }
+          return candidate;
+        };
+
+        while (queue.length) {
+          if (expandedStates >= maxStates || performance.now() > deadline) {
+            truncated = true;
+            break;
+          }
+
+          queue.sort((a, b) => compareNode(queueScore(b, input.targetPiece), queueScore(a, input.targetPiece)));
+          const node = queue.shift();
+          expandedStates += 1;
+
+          if (onProgress && expandedStates % 20 === 0) {
+            onProgress({
+              progress: Math.min(94, Math.round((expandedStates / maxStates) * 100)),
+              detail: node.star >= 6 ? "Validating final route..." : `Checking ${node.star}â˜… -> ${node.star + 1}â˜… options...`
+            });
+          }
+
+          considerCandidate(finalizeNodeForTarget(node, input), true);
+          considerCandidate(finalizeNodeForAny(node, input), false);
+
+          if (node.star >= 6) continue;
+
+          const cost = STAR_COSTS[node.star];
+          const waypoints = waypointOptions(node.ownedBlueprints, node.ownedKeyGearBlueprints, node.piece, input.targetPiece);
+
+          waypoints.forEach(nextPiece => {
+            if (!canStandOnPiece(nextPiece, node, input.targetPiece)) return;
+            if (nextPiece !== node.piece && node.lockedCurrent) return;
+
+            const didConvert = nextPiece !== node.piece;
+            const nextConversions = node.conversions + (didConvert ? 1 : 0);
+            if (nextConversions > input.conversionAttemptsAvailable) return;
+
+            const category = pieceCategory(nextPiece);
+            const startingPartial = didConvert ? 0 : node.partialXp;
+            const warnings = [...node.warnings];
+            if (didConvert && node.partialXp > 0) warnings.push(`Converting from ${node.piece} to ${nextPiece} discards ${node.partialXp} partial XP.`);
+
+            const needed = cost - startingPartial;
+            let advanced = null;
+
+            if (needed <= 0) {
+              advanced = {
+                ...node,
+                piece: nextPiece,
+                star: node.star + 1,
+                partialXp: 0,
+                steps: [...node.steps, buildStep({
+                  currentPiece: node.piece,
+                  destinationPiece: nextPiece,
+                  starFrom: node.star,
+                  starTo: node.star + 1,
+                  category,
+                  usage: { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] },
+                  spentXp: startingPartial,
+                  waste: 0,
+                  why: "Existing partial XP already completed this threshold.",
+                  progressOnly: false
+                })],
+                conversions: nextConversions,
+                warnings,
+                lockedCurrent: false
+              };
+            } else {
+              const spend = spendForThreshold(node.inventory, category, nextPiece, needed, `${node.star}â˜… -> ${node.star + 1}â˜…`);
+              if (!spend) return;
+              advanced = {
+                ...node,
+                piece: nextPiece,
+                star: node.star + 1,
+                partialXp: 0,
+                inventory: spend.nextInventory,
+                steps: [...node.steps, buildStep({
+                  currentPiece: node.piece,
+                  destinationPiece: nextPiece,
+                  starFrom: node.star,
+                  starTo: node.star + 1,
+                  category,
+                  usage: spend.usage,
+                  spentXp: spend.spentXp + startingPartial,
+                  waste: spend.waste,
+                  why: spend.why,
+                  progressOnly: false
+                })],
+                totalWaste: node.totalWaste + spend.waste,
+                conversions: nextConversions,
+                warnings,
+                lockedCurrent: false
+              };
+            }
+
+            const key = stateKey(advanced);
+            const old = seen.get(key);
+            if (!old || compareNode(queueScore(advanced, input.targetPiece), queueScore(old, input.targetPiece)) > 0) {
+              seen.set(key, advanced);
+              queue.push(advanced);
+            }
+          });
+        }
+
+        const deduped = [];
+        const used = new Set();
+        alternatives.forEach(node => {
+          if (!node) return;
+          const key = `${node.finalPiece}|${node.star}|${node.partialXp}|${node.totalWaste}|${node.conversions}`;
+          if (!used.has(key)) {
+            used.add(key);
+            deduped.push(node);
+          }
+        });
+
+        return {
+          best,
+          bestOverall,
+          alternatives: deduped.slice(0, 3),
+          rejectedCandidates,
+          truncated,
+          expandedStates,
+          durationMs: performance.now() - startedAt
+        };
+      }
+
       function renderResults(result, input) {
         const best = result.best;
         const validated = !validateGeneratedPlan({ best }, input).length;
@@ -1959,6 +2262,111 @@
           <div class="step">
             <h4>Alternative Path Close in Value</h4>
             ${alternatives}
+          </div>
+          <div class="step">
+            <h4>Warnings</h4>
+            ${warningHtml}
+          </div>
+        `;
+      }
+
+      function formatInventorySnapshot(snapshot) {
+        const general = CATEGORIES.map(category => {
+          const row = snapshot.general[category];
+          return `${category}: ${row.epic} epic, ${row.fine} fine, ${row.common} common`;
+        }).join(" | ");
+        const legendary = snapshot.legendary.length ? snapshot.legendary.map(item => `${item.name} (${item.count})`).join(", ") : "None";
+        const keyGear = snapshot.keyGear.length ? snapshot.keyGear.map(item => `${item.name} (${item.count})`).join(", ") : "None";
+        return `General: ${general}\nLegendary: ${legendary}\nKey Gear: ${keyGear}`;
+      }
+
+      function renderResults(result, input) {
+        const best = result.best;
+        const replay = best.validation || replayRouteCandidate(best, input);
+        const validated = replay.valid;
+        const conversionsRemaining = Math.max(0, input.conversionAttemptsAvailable - best.conversions);
+        const nonTargetWarning = result.bestOverall && result.bestOverall.finalPiece !== input.targetPiece && (
+          result.bestOverall.star > best.star ||
+          (result.bestOverall.star === best.star && result.bestOverall.partialXp > best.partialXp)
+        )
+          ? `A stronger route exists on ${result.bestOverall.finalPiece}, but it cannot finish on ${input.targetPiece} within the available conversion attempts.`
+          : "";
+        const splitUsage = (items, xp) => items.filter(item => item.xpEach === xp).map(item => `${item.count} ${item.name}`).join(", ") || "None";
+
+        const stepsHtml = replay.steps.length
+          ? replay.steps.map((step, index) => `
+            <div class="step">
+              <h4>Step ${index + 1}: ${esc(step.title)}</h4>
+              <p><strong>Current piece:</strong> ${esc(step.currentPiece)}</p>
+              <p><strong>Destination piece:</strong> ${esc(step.destinationPiece)}</p>
+              <p><strong>Convert:</strong> ${step.conversion ? esc(step.conversion) : "No conversion"}</p>
+              <p><strong>Same-category conversion for 60 XP unlock:</strong> ${step.sameCategoryConversion ? "Yes" : "No"}</p>
+              <p><strong>Star jump:</strong> ${step.progressOnly ? "Partial progress only" : `${step.starFrom}â˜… -> ${step.starTo}â˜…`}</p>
+              <p><strong>Category used:</strong> ${esc(step.category)}</p>
+              <p><strong>Inventory before step:</strong><br><pre>${esc(formatInventorySnapshot(step.inventoryBefore))}</pre></p>
+              <p><strong>Exact fragments spent:</strong> ${esc(usageText(step.usage))}</p>
+              <p><strong>Legendary @ 60 XP exact match:</strong> ${esc(splitUsage(step.usage.legendary, 60))}</p>
+              <p><strong>Legendary @ 30 XP non-match:</strong> ${esc(splitUsage(step.usage.legendary, 30))}</p>
+              <p><strong>Key Gear @ 60 XP exact match:</strong> ${esc(splitUsage(step.usage.keyGear, 60))}</p>
+              <p><strong>Key Gear @ 30 XP non-match:</strong> ${esc(splitUsage(step.usage.keyGear, 30))}</p>
+              <p><strong>Exact XP total spent:</strong> ${step.spentXp}</p>
+              <p><strong>Waste:</strong> ${step.waste}</p>
+              <p><strong>Inventory after step:</strong><br><pre>${esc(formatInventorySnapshot(step.inventoryAfter))}</pre></p>
+              <p><strong>Why this step was chosen:</strong> ${esc(step.why)}</p>
+            </div>
+          `).join("")
+          : `<div class="step"><p class="muted">No valid route found for the selected target piece.</p></div>`;
+
+        const warnings = [...best.warnings, ...(nonTargetWarning ? [nonTargetWarning] : [])];
+        const warningHtml = warnings.length
+          ? `<ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`
+          : `<p class="muted">No conversion warnings for the chosen route.</p>`;
+
+        const alternatives = result.alternatives.length
+          ? `<ul>${result.alternatives.map(node => `<li>${esc(outcomeText(node))} Waste ${node.totalWaste}, conversions ${node.conversions}, final piece ${esc(node.finalPiece || node.piece)}.</li>`).join("")}</ul>`
+          : `<p class="muted">No close alternative path worth surfacing.</p>`;
+
+        const rejected = result.rejectedCandidates?.length
+          ? `<ul>${result.rejectedCandidates.map(item => `<li>Rejected ${item.star}â˜… + ${item.partialXp} on ${esc(item.finalPiece)}: ${esc(item.reason)}</li>`).join("")}</ul>`
+          : `<p class="muted">No high-scoring candidates were rejected by replay validation.</p>`;
+
+        dom.resultsArea.innerHTML = `
+          <div class="summary-grid">
+            <div class="summary-card"><span class="muted">Target Piece Requested</span><strong>${esc(input.targetPiece)}</strong></div>
+            <div class="summary-card"><span class="muted">Final Piece Achieved</span><strong>${esc(best.finalPiece || best.piece)}</strong></div>
+            <div class="summary-card"><span class="muted">Best Valid Result On Target</span><strong>${esc(outcomeText(best))}</strong></div>
+            <div class="summary-card"><span class="muted">6â˜… Possible</span><strong>${best.star >= 6 ? "Yes" : "No"}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Available</span><strong>${input.conversionAttemptsAvailable}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Used</span><strong>${best.conversions}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Remaining</span><strong>${conversionsRemaining}</strong></div>
+            <div class="summary-card"><span class="muted">Route Validated</span><strong>${validated ? "Yes" : "No"}</strong></div>
+            <div class="summary-card"><span class="muted">Calculation Time</span><strong>${(result.durationMs || 0).toFixed(0)} ms</strong></div>
+          </div>
+          <div class="step">
+            <h4>Compact Summary</h4>
+            <p>${esc(outcomeText(best))}</p>
+            <p><strong>Current piece:</strong> ${esc(input.currentPiece)} at ${input.currentStar}â˜… + ${input.currentXp} / ${STAR_COSTS[input.currentStar]}</p>
+            <p><strong>Target piece:</strong> ${esc(input.targetPiece)}</p>
+            <p><strong>Conversions available / used / remaining:</strong> ${input.conversionAttemptsAvailable} / ${best.conversions} / ${conversionsRemaining}</p>
+            <p><strong>Route validated:</strong> ${validated ? "Yes" : "No"}</p>
+          </div>
+          <h3>Ordered Step-by-Step Path</h3>
+          ${stepsHtml}
+          <div class="step">
+            <h4>Final Recommended Piece</h4>
+            <p>${esc(best.finalPiece || best.piece)}</p>
+          </div>
+          <div class="step">
+            <h4>Remaining Inventory After Plan</h4>
+            ${renderLeftovers(replay.finalInventory)}
+          </div>
+          <div class="step">
+            <h4>Alternative Path Close in Value</h4>
+            ${alternatives}
+          </div>
+          <div class="step">
+            <h4>Rejected Candidates</h4>
+            ${rejected}
           </div>
           <div class="step">
             <h4>Warnings</h4>
@@ -2124,6 +2532,7 @@
           ${finalizeNodeForAny.toString()}
           ${queueScore.toString()}
           ${stateKey.toString()}
+          ${replayRouteCandidate.toString()}
           ${searchBestPath.toString()}
           self.onmessage = event => {
             const payload = event.data;
@@ -2162,6 +2571,9 @@
             console.timeEnd("planner-total");
             console.log("[planner] worker search finished", message.result);
             if (!message.result?.best) {
+              const rejectedHtml = (message.result?.rejectedCandidates || []).length
+                ? `<ul>${message.result.rejectedCandidates.map(item => `<li>${esc(item.reason)}</li>`).join("")}</ul>`
+                : "<p>No validated target-ending route was found.</p>";
               setCalcState({
                 running: false,
                 status: "No valid route found",
@@ -2169,7 +2581,7 @@
                 progress: 100,
                 elapsedMs: message.result?.durationMs || (performance.now() - runStartedAt)
               });
-              dom.resultsArea.innerHTML = `<div class="step"><h4>No Valid Route Found</h4><p>The planner could not find a fully valid route that ends on ${esc(input.targetPiece)} with the current inventory, owned blueprints, and conversion attempts.</p></div>`;
+              dom.resultsArea.innerHTML = `<div class="step"><h4>No Valid Route Found</h4><p>The planner could not find a fully valid route that ends on ${esc(input.targetPiece)} with the current inventory, owned blueprints, and conversion attempts.</p><h4>Rejected Candidates</h4>${rejectedHtml}</div>`;
               showMessage("error", "No valid route found for the selected target piece.");
               activeWorker.terminate();
               activeWorker = null;
