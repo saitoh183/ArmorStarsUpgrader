@@ -338,13 +338,17 @@
             <label for="currentXp">Current XP toward next star</label>
             <input id="currentXp" type="number" min="0" step="1" />
           </div>
-          <div class="checkbox">
-            <input id="discardPartialOnConvert" type="checkbox" checked />
-            <label for="discardPartialOnConvert">Assume current partial XP can be discarded if conversion is needed</label>
+          <div>
+            <label for="conversionAttempts">Blueprint Conversion Attempts Available</label>
+            <input id="conversionAttempts" type="number" min="0" step="1" />
           </div>
           <div>
             <label for="targetPiece">Target piece</label>
             <select id="targetPiece"></select>
+          </div>
+          <div class="checkbox">
+            <input id="discardPartialOnConvert" type="checkbox" checked />
+            <label for="discardPartialOnConvert">Assume current partial XP can be discarded if conversion is needed</label>
           </div>
         </div>
       </div>
@@ -381,7 +385,7 @@
                 <th>Fine XP</th>
                 <th>Common XP</th>
                 <th>Total Base XP</th>
-                <th>Clear</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -406,7 +410,7 @@
                 <th>Count</th>
                 <th>XP Each</th>
                 <th>Note</th>
-                <th>Clear</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -518,6 +522,7 @@
         currentCategory: $("currentCategory"),
         currentStar: $("currentStar"),
         currentXp: $("currentXp"),
+        conversionAttempts: $("conversionAttempts"),
         discard: $("discardPartialOnConvert"),
         targetPiece: $("targetPiece"),
         ownedBlueprints: $("ownedBlueprints"),
@@ -567,6 +572,7 @@
           currentPiece: ARMOR_SETS[0].name,
           currentStar: 1,
           currentXp: 0,
+          conversionAttemptsAvailable: 18,
           discardPartialOnConvert: true,
           targetPiece: KEY_GEAR[KEY_GEAR.length - 1].name,
           ownedBlueprints: ARMOR_SETS.reduce((acc, set, index) => {
@@ -590,6 +596,7 @@
         const next = clone(base);
         Object.assign(next, incoming || {});
         next.general = { ...base.general, ...(incoming?.general || {}) };
+        next.conversionAttemptsAvailable = num(incoming?.conversionAttemptsAvailable ?? incoming?.conversionAttempts ?? base.conversionAttemptsAvailable);
         CATEGORIES.forEach(category => {
           next.general[category] = { ...base.general[category], ...(incoming?.general?.[category] || {}) };
         });
@@ -632,27 +639,61 @@
         dom.currentPiece.value = state.currentPiece;
         dom.currentStar.value = String(state.currentStar);
         dom.currentXp.value = state.currentXp;
+        dom.conversionAttempts.value = state.conversionAttemptsAvailable;
         dom.discard.checked = !!state.discardPartialOnConvert;
         dom.targetPiece.value = state.targetPiece;
         dom.currentCategory.value = pieceCategory(state.currentPiece);
       }
 
-      function renderOwnedBlueprints() {
-        dom.ownedBlueprints.innerHTML = ARMOR_SETS.map(set => `
-          <label class="owned-card">
-            <input type="checkbox" data-owned="${esc(set.name)}" ${state.ownedBlueprints[set.name] ? "checked" : ""}>
-            <span><strong>${esc(set.name)}</strong><br><span class="muted">${esc(set.category)}</span></span>
-          </label>
+      function sortPiecesByCategory(items) {
+        return [...items].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+      }
+
+      function groupedSelectHtml(items, selectedName, usedNames) {
+        const grouped = CATEGORIES.map(category => ({
+          category,
+          items: sortPiecesByCategory(items.filter(item => item.category === category && (item.name === selectedName || !usedNames.has(item.name))))
+        })).filter(group => group.items.length);
+
+        return grouped.map(group => `
+          <optgroup label="${esc(group.category)}">
+            ${group.items.map(item => `<option value="${esc(item.name)}" ${item.name === selectedName ? "selected" : ""}>${esc(item.name)}</option>`).join("")}
+          </optgroup>
         `).join("");
       }
 
+      function groupedOwnedCardsHtml(items, checkedMap, attrName) {
+        return CATEGORIES.map(category => {
+          const grouped = sortPiecesByCategory(items.filter(item => item.category === category));
+          if (!grouped.length) return "";
+          return `
+            <div class="step" style="margin-bottom:10px;">
+              <h4>${esc(category)}</h4>
+              <div class="owned-grid">
+                ${grouped.map(item => `
+                  <label class="owned-card">
+                    <input type="checkbox" ${attrName}="${esc(item.name)}" ${checkedMap[item.name] ? "checked" : ""}>
+                    <span><strong>${esc(item.name)}</strong><br><span class="muted">${esc(item.category)}</span></span>
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      function nextAvailableName(items, rows, field, fallback) {
+        const used = new Set(rows.map(row => row[field]));
+        const available = sortPiecesByCategory(items).find(item => !used.has(item.name));
+        return available ? available.name : fallback;
+      }
+
+      function renderOwnedBlueprints() {
+        dom.ownedBlueprints.innerHTML = groupedOwnedCardsHtml(ARMOR_SETS, state.ownedBlueprints, 'data-owned');
+      }
+
       function renderOwnedKeyGearBlueprints() {
-        dom.ownedKeyGearBlueprints.innerHTML = KEY_GEAR.map(item => `
-          <label class="owned-card">
-            <input type="checkbox" data-owned-key="${esc(item.name)}" ${state.ownedKeyGearBlueprints[item.name] ? "checked" : ""}>
-            <span><strong>${esc(item.name)}</strong><br><span class="muted">${esc(item.category)}</span></span>
-          </label>
-        `).join("");
+        dom.ownedKeyGearBlueprints.innerHTML = groupedOwnedCardsHtml(KEY_GEAR, state.ownedKeyGearBlueprints, 'data-owned-key');
       }
 
       function getOwnedPieceNames() {
@@ -666,7 +707,7 @@
         [state.currentPiece, state.targetPiece].forEach(name => {
           if (PIECE_META[name]) options.set(name, PIECE_META[name]);
         });
-        return Array.from(options.values()).sort((a, b) => a.name.localeCompare(b.name));
+        return sortPiecesByCategory(Array.from(options.values()));
       }
 
       function renderGeneralTable() {
@@ -706,20 +747,25 @@
       }
 
       function renderLegendaryTable() {
+        const usedNames = new Set(state.legendaryRows.filter(row => row.count > 0 || row.setName).map(row => row.setName));
         dom.legendaryBody.innerHTML = state.legendaryRows.map(row => {
           const category = ARMOR_CATEGORY[row.setName];
+          const rowUsedNames = new Set([...usedNames].filter(name => name !== row.setName));
           return `
             <tr data-row-id="${esc(row.id)}">
               <td>
                 <select data-legendary-set="${esc(row.id)}">
-                  ${ARMOR_SETS.map(set => `<option value="${esc(set.name)}" ${set.name === row.setName ? "selected" : ""}>${esc(set.name)}</option>`).join("")}
+                  ${groupedSelectHtml(ARMOR_SETS, row.setName, rowUsedNames)}
                 </select>
               </td>
               <td><input readonly value="${esc(category)}"></td>
               <td><input type="number" min="0" data-legendary-count="${esc(row.id)}" value="${row.count}"></td>
               <td><span class="pill">30 / 60</span></td>
               <td class="muted" data-role="legend-note">60 on ${esc(row.setName)}, otherwise 30 in ${esc(category)}</td>
-              <td><button class="btn-muted btn-small" data-clear-legendary="${esc(row.id)}">Clear</button></td>
+              <td>
+                <button class="btn-muted btn-small" data-clear-legendary="${esc(row.id)}">Clear</button>
+                <button class="btn-danger btn-small" data-delete-legendary="${esc(row.id)}">Delete</button>
+              </td>
             </tr>
           `;
         }).join("");
@@ -739,20 +785,25 @@
       }
 
       function renderKeyGearTable() {
+        const usedNames = new Set(state.keyGearRows.filter(row => row.count > 0 || row.keyName).map(row => row.keyName));
         dom.keyBody.innerHTML = state.keyGearRows.map(row => {
           const category = KEY_CATEGORY[row.keyName];
+          const rowUsedNames = new Set([...usedNames].filter(name => name !== row.keyName));
           return `
             <tr data-row-id="${esc(row.id)}">
               <td>
                 <select data-key-name="${esc(row.id)}">
-                  ${KEY_GEAR.map(item => `<option value="${esc(item.name)}" ${item.name === row.keyName ? "selected" : ""}>${esc(item.name)}</option>`).join("")}
+                  ${groupedSelectHtml(KEY_GEAR, row.keyName, rowUsedNames)}
                 </select>
               </td>
               <td><input readonly value="${esc(category)}"></td>
               <td><input type="number" min="0" data-key-count="${esc(row.id)}" value="${row.count}"></td>
               <td><span class="pill">30 / 60</span></td>
               <td class="muted" data-role="key-note">60 on exact ${esc(row.keyName)}, otherwise 30 in ${esc(category)}</td>
-              <td><button class="btn-muted btn-small" data-clear-key="${esc(row.id)}">Clear</button></td>
+              <td>
+                <button class="btn-muted btn-small" data-clear-key="${esc(row.id)}">Clear</button>
+                <button class="btn-danger btn-small" data-delete-key="${esc(row.id)}">Delete</button>
+              </td>
             </tr>
           `;
         }).join("");
@@ -784,6 +835,7 @@
         state.currentPiece = dom.currentPiece.value;
         state.currentStar = num(dom.currentStar.value) || 1;
         state.currentXp = num(dom.currentXp.value);
+        state.conversionAttemptsAvailable = num(dom.conversionAttempts.value);
         state.discardPartialOnConvert = dom.discard.checked;
         state.targetPiece = dom.targetPiece.value;
         dom.currentCategory.value = pieceCategory(state.currentPiece);
@@ -1184,14 +1236,441 @@
         };
       }
 
+      function spendForProgress(inventory, category, activePiece, maxXp, label) {
+        if (maxXp <= 0) {
+          return {
+            nextInventory: clone(inventory),
+            usage: { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] },
+            spentXp: 0,
+            waste: 0,
+            why: `${label} could not spend any legal XP without crossing the next threshold.`
+          };
+        }
+
+        const sources = fragmentSources(inventory, category, activePiece);
+        if (!sources.length) return null;
+        const limit = maxXp;
+        const pseudoItems = [];
+
+        sources.forEach((source, sourceIndex) => {
+          let remaining = Math.min(source.count, Math.ceil(limit / source.value) + 1);
+          let chunk = 1;
+          while (remaining > 0) {
+            const used = Math.min(chunk, remaining);
+            pseudoItems.push({
+              sourceIndex,
+              count: used,
+              xp: used * source.value,
+              preserve: used * source.preserveRank,
+              fragments: used,
+              order: used * source.spendRank
+            });
+            remaining -= used;
+            chunk *= 2;
+          }
+        });
+
+        const dp = new Array(limit + 1).fill(null);
+        dp[0] = { prev: -1, itemIndex: -1, preserve: 0, fragments: 0, order: 0 };
+        const better = (a, b) => !b || a.preserve < b.preserve || (a.preserve === b.preserve && (a.fragments < b.fragments || (a.fragments === b.fragments && a.order < b.order)));
+
+        pseudoItems.forEach((item, itemIndex) => {
+          for (let xp = limit; xp >= item.xp; xp -= 1) {
+            const prev = dp[xp - item.xp];
+            if (!prev) continue;
+            const candidate = {
+              prev: xp - item.xp,
+              itemIndex,
+              preserve: prev.preserve + item.preserve,
+              fragments: prev.fragments + item.fragments,
+              order: prev.order + item.order
+            };
+            if (better(candidate, dp[xp])) dp[xp] = candidate;
+          }
+        });
+
+        let bestXp = 0;
+        let bestMeta = dp[0];
+        for (let xp = 1; xp <= limit; xp += 1) {
+          if (!dp[xp]) continue;
+          if (xp > bestXp || (xp === bestXp && better(dp[xp], bestMeta))) {
+            bestXp = xp;
+            bestMeta = dp[xp];
+          }
+        }
+
+        const picked = new Array(sources.length).fill(0);
+        let cursor = bestXp;
+        while (cursor > 0) {
+          const entry = dp[cursor];
+          const item = pseudoItems[entry.itemIndex];
+          picked[item.sourceIndex] += item.count;
+          cursor = entry.prev;
+        }
+
+        const nextInventory = clone(inventory);
+        const usage = { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] };
+        sources.forEach((source, sourceIndex) => {
+          const used = picked[sourceIndex] || 0;
+          if (!used) return;
+          if (source.kind === "general") {
+            if (source.label === "Common") nextInventory.general[category].common -= used, usage.common += used;
+            if (source.label === "Fine") nextInventory.general[category].fine -= used, usage.fine += used;
+            if (source.label === "Epic") nextInventory.general[category].epic -= used, usage.epic += used;
+          } else if (source.kind === "legendary") {
+            const item = nextInventory.legendary.find(entry => `legendary:${entry.id}` === source.id);
+            if (item) item.count -= used;
+            usage.legendary.push({ name: source.label, count: used, xpEach: source.value });
+          } else {
+            const item = nextInventory.keyGear.find(entry => `key:${entry.id}` === source.id);
+            if (item) item.count -= used;
+            usage.keyGear.push({ name: source.label, count: used, xpEach: source.value });
+          }
+        });
+
+        nextInventory.legendary = nextInventory.legendary.filter(item => item.count > 0);
+        nextInventory.keyGear = nextInventory.keyGear.filter(item => item.count > 0);
+
+        return {
+          nextInventory,
+          usage,
+          spentXp: bestXp,
+          waste: 0,
+          why: bestXp > 0
+            ? `${label} spent exact remaining inventory for the best legal progress without crossing the next threshold.`
+            : `${label} could not spend any legal XP without crossing the next threshold.`
+        };
+      }
+
+      function queueScore(node, targetPiece) {
+        return {
+          star: node.star,
+          partialXp: node.partialXp,
+          targetBias: node.piece === targetPiece ? 1 : 0,
+          waste: node.totalWaste,
+          conversions: node.conversions
+        };
+      }
+
+      function compareNode(a, b) {
+        if (a.star !== b.star) return a.star - b.star;
+        if (a.partialXp !== b.partialXp) return a.partialXp - b.partialXp;
+        if (a.targetBias !== b.targetBias) return a.targetBias - b.targetBias;
+        if (a.waste !== b.waste) return b.waste - a.waste;
+        if (a.conversions !== b.conversions) return b.conversions - a.conversions;
+        return 0;
+      }
+
+      function compareFinalResults(a, b, targetPiece) {
+        if (!a) return -1;
+        if (!b) return 1;
+        const aOnTarget = a.finalPiece === targetPiece ? 1 : 0;
+        const bOnTarget = b.finalPiece === targetPiece ? 1 : 0;
+        if (aOnTarget !== bOnTarget) return aOnTarget - bOnTarget;
+        if (a.star !== b.star) return a.star - b.star;
+        if (a.partialXp !== b.partialXp) return a.partialXp - b.partialXp;
+        if (a.totalWaste !== b.totalWaste) return b.totalWaste - a.totalWaste;
+        if (a.conversions !== b.conversions) return b.conversions - a.conversions;
+        return 0;
+      }
+
+      function isOwnedPiece(piece, ownedArmor, ownedKeyGear, currentPiece) {
+        if (piece === currentPiece) return true;
+        if (pieceType(piece) === "set") return !!ownedArmor[piece];
+        if (pieceType(piece) === "key") return !!ownedKeyGear[piece];
+        return false;
+      }
+
+      function canStandOnPiece(candidatePiece, node, targetPiece) {
+        if (candidatePiece === node.piece) return true;
+        if (candidatePiece === node.currentPiece) return true;
+        if (pieceType(candidatePiece) === "set") return !!node.ownedBlueprints[candidatePiece];
+        if (pieceType(candidatePiece) === "key") return !!node.ownedKeyGearBlueprints[candidatePiece];
+        return false;
+      }
+
+      function buildStep({ currentPiece, destinationPiece, starFrom, starTo, category, usage, spentXp, waste, why, progressOnly }) {
+        return {
+          title: progressOnly ? `Progress on ${destinationPiece}` : `${starFrom}â˜… -> ${starTo}â˜… on ${destinationPiece}`,
+          currentPiece,
+          destinationPiece,
+          conversion: currentPiece !== destinationPiece ? `Convert ${currentPiece} -> ${destinationPiece}` : null,
+          sameCategoryConversion: currentPiece !== destinationPiece && pieceCategory(currentPiece) === pieceCategory(destinationPiece),
+          starFrom,
+          starTo,
+          progressOnly: !!progressOnly,
+          category,
+          usage,
+          spentXp,
+          waste,
+          why
+        };
+      }
+
+      function finalizeNodeForPiece(node, finalPiece, input) {
+        if (!isOwnedPiece(finalPiece, node.ownedBlueprints, node.ownedKeyGearBlueprints, node.currentPiece)) return null;
+        if (node.lockedCurrent && finalPiece !== node.piece) return null;
+
+        const finalized = {
+          ...node,
+          inventory: clone(node.inventory),
+          steps: [...node.steps],
+          warnings: [...node.warnings],
+          finalPiece: node.piece,
+          routeValidated: false,
+          validationErrors: []
+        };
+
+        if (finalPiece !== finalized.piece) {
+          if (finalized.conversions + 1 > input.conversionAttemptsAvailable) return null;
+          if (finalized.partialXp > 0) finalized.warnings.push(`Converting from ${finalized.piece} to ${finalPiece} discards ${finalized.partialXp} partial XP.`);
+          finalized.steps.push(buildStep({
+            currentPiece: finalized.piece,
+            destinationPiece: finalPiece,
+            starFrom: finalized.star,
+            starTo: finalized.star,
+            category: pieceCategory(finalPiece),
+            usage: { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] },
+            spentXp: 0,
+            waste: 0,
+            why: finalPiece === input.targetPiece ? "Used a conversion attempt so the route ends on the requested target piece." : "Converted to another owned piece to improve the final route.",
+            progressOnly: true
+          }));
+          finalized.conversions += 1;
+          finalized.piece = finalPiece;
+          finalized.partialXp = 0;
+        }
+
+        finalized.finalPiece = finalPiece;
+        if (finalized.star >= 6) {
+          finalized.partialXp = 0;
+          return finalized;
+        }
+
+        const requirement = STAR_COSTS[finalized.star];
+        const progress = spendForProgress(finalized.inventory, pieceCategory(finalPiece), finalPiece, requirement - 1, `Final progress on ${finalPiece}`);
+        if (!progress) return finalized;
+        finalized.inventory = progress.nextInventory;
+        finalized.partialXp = progress.spentXp;
+        if (progress.spentXp > 0) {
+          finalized.steps.push(buildStep({
+            currentPiece: finalPiece,
+            destinationPiece: finalPiece,
+            starFrom: finalized.star,
+            starTo: finalized.star,
+            category: pieceCategory(finalPiece),
+            usage: progress.usage,
+            spentXp: progress.spentXp,
+            waste: 0,
+            why: progress.why,
+            progressOnly: true
+          }));
+        }
+        return finalized;
+      }
+
+      function finalizeNodeForTarget(node, input) {
+        return finalizeNodeForPiece(node, input.targetPiece, input);
+      }
+
+      function finalizeNodeForAny(node, input) {
+        const candidates = waypointOptions(node.ownedBlueprints, node.ownedKeyGearBlueprints, node.piece, input.targetPiece)
+          .filter(piece => canStandOnPiece(piece, node, input.targetPiece))
+          .filter(piece => !node.lockedCurrent || piece === node.piece);
+        let best = null;
+        candidates.forEach(piece => {
+          const candidate = finalizeNodeForPiece(node, piece, input);
+          if (compareFinalResults(candidate, best, input.targetPiece) > 0) best = candidate;
+        });
+        return best;
+      }
+
+      function stateKey(node) {
+        return `${node.piece}|${node.star}|${node.partialXp}|${node.conversions}|${inventoryKey(node.inventory)}|${node.lockedCurrent ? 1 : 0}`;
+      }
+
+      function searchBestPath(input, options = {}) {
+        const maxStates = options.maxStates || 7000;
+        const deadline = performance.now() + (options.maxMs || 3000);
+        const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+        const startedAt = performance.now();
+        const start = {
+          piece: input.currentPiece,
+          currentPiece: input.currentPiece,
+          star: input.currentStar,
+          partialXp: input.currentXp,
+          inventory: buildInventory(input),
+          steps: [],
+          totalWaste: 0,
+          conversions: 0,
+          warnings: [],
+          ownedBlueprints: { ...input.ownedBlueprints },
+          ownedKeyGearBlueprints: { ...(input.ownedKeyGearBlueprints || {}) },
+          lockedCurrent: !input.discardPartialOnConvert && input.currentXp > 0,
+          finalPiece: input.currentPiece
+        };
+
+        let best = null;
+        let bestOverall = null;
+        const alternatives = [];
+        const queue = [start];
+        const seen = new Map();
+        let expandedStates = 0;
+        let truncated = false;
+
+        while (queue.length) {
+          if (expandedStates >= maxStates || performance.now() > deadline) {
+            truncated = true;
+            break;
+          }
+
+          queue.sort((a, b) => compareNode(queueScore(b, input.targetPiece), queueScore(a, input.targetPiece)));
+          const node = queue.shift();
+          expandedStates += 1;
+          if (onProgress && expandedStates % 20 === 0) {
+            onProgress({
+              progress: Math.min(94, Math.round((expandedStates / maxStates) * 100)),
+              detail: node.star >= 6 ? "Validating final route..." : `Checking ${node.star}â˜… -> ${node.star + 1}â˜… options...`
+            });
+          }
+
+          const targetCandidate = finalizeNodeForTarget(node, input);
+          if (targetCandidate) {
+            if (!best || compareFinalResults(targetCandidate, best, input.targetPiece) > 0) {
+              if (best) alternatives.push(best);
+              best = targetCandidate;
+            } else if (compareFinalResults(targetCandidate, best, input.targetPiece) >= -1) {
+              alternatives.push(targetCandidate);
+            }
+          }
+
+          const overallCandidate = finalizeNodeForAny(node, input);
+          if (overallCandidate && compareFinalResults(overallCandidate, bestOverall, input.targetPiece) > 0) {
+            bestOverall = overallCandidate;
+          }
+
+          if (node.star >= 6) continue;
+
+          const cost = STAR_COSTS[node.star];
+          const waypoints = waypointOptions(node.ownedBlueprints, node.ownedKeyGearBlueprints, node.piece, input.targetPiece);
+
+          waypoints.forEach(nextPiece => {
+            if (!canStandOnPiece(nextPiece, node, input.targetPiece)) return;
+            if (nextPiece !== node.piece && node.lockedCurrent) return;
+
+            const didConvert = nextPiece !== node.piece;
+            const nextConversions = node.conversions + (didConvert ? 1 : 0);
+            if (nextConversions > input.conversionAttemptsAvailable) return;
+
+            const category = pieceCategory(nextPiece);
+            const startingPartial = didConvert ? 0 : node.partialXp;
+            const warnings = [...node.warnings];
+            if (didConvert && node.partialXp > 0) warnings.push(`Converting from ${node.piece} to ${nextPiece} discards ${node.partialXp} partial XP.`);
+
+            const needed = cost - startingPartial;
+
+            if (needed <= 0) {
+              const advanced = {
+                ...node,
+                piece: nextPiece,
+                star: node.star + 1,
+                partialXp: 0,
+                steps: [...node.steps, buildStep({
+                  currentPiece: node.piece,
+                  destinationPiece: nextPiece,
+                  starFrom: node.star,
+                  starTo: node.star + 1,
+                  category,
+                  usage: { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] },
+                  spentXp: startingPartial,
+                  waste: 0,
+                  why: "Existing partial XP already completed this threshold.",
+                  progressOnly: false
+                })],
+                conversions: nextConversions,
+                warnings,
+                lockedCurrent: false
+              };
+              const key = stateKey(advanced);
+              const old = seen.get(key);
+              if (!old || compareNode(queueScore(advanced, input.targetPiece), queueScore(old, input.targetPiece)) > 0) {
+                seen.set(key, advanced);
+                queue.push(advanced);
+              }
+              return;
+            }
+
+            const spend = spendForThreshold(node.inventory, category, nextPiece, needed, `${node.star}â˜… -> ${node.star + 1}â˜…`);
+            if (!spend) return;
+
+            const advanced = {
+              ...node,
+              piece: nextPiece,
+              star: node.star + 1,
+              partialXp: 0,
+              inventory: spend.nextInventory,
+              steps: [...node.steps, buildStep({
+                currentPiece: node.piece,
+                destinationPiece: nextPiece,
+                starFrom: node.star,
+                starTo: node.star + 1,
+                category,
+                usage: spend.usage,
+                spentXp: spend.spentXp + startingPartial,
+                waste: spend.waste,
+                why: spend.why,
+                progressOnly: false
+              })],
+              totalWaste: node.totalWaste + spend.waste,
+              conversions: nextConversions,
+              warnings,
+              lockedCurrent: false
+            };
+
+            const key = stateKey(advanced);
+            const old = seen.get(key);
+            if (!old || compareNode(queueScore(advanced, input.targetPiece), queueScore(old, input.targetPiece)) > 0) {
+              seen.set(key, advanced);
+              queue.push(advanced);
+            }
+          });
+        }
+
+        const deduped = [];
+        const used = new Set();
+        alternatives.forEach(node => {
+          if (!node) return;
+          const key = `${node.finalPiece}|${node.star}|${node.partialXp}|${node.totalWaste}|${node.conversions}`;
+          if (!used.has(key)) {
+            used.add(key);
+            deduped.push(node);
+          }
+        });
+
+        return {
+          best,
+          bestOverall,
+          alternatives: deduped.filter(node => best && compareFinalResults(node, best, input.targetPiece) < 0).slice(0, 3),
+          truncated,
+          expandedStates,
+          durationMs: performance.now() - startedAt
+        };
+      }
+
       function validateInput(input) {
         if (!PIECE_META[input.currentPiece]) return "Pick a valid current armor piece.";
         if (!PIECE_META[input.targetPiece]) return "Pick a valid target piece.";
         if (input.currentStar < 1 || input.currentStar > 5) return "Current star must be between 1 and 5.";
         const limit = STAR_COSTS[input.currentStar];
         if (input.currentXp < 0 || input.currentXp >= limit) return `Current XP must be between 0 and ${limit - 1} for the selected star.`;
+        if (!Number.isInteger(input.conversionAttemptsAvailable) || input.conversionAttemptsAvailable < 0) {
+          return "Blueprint Conversion Attempts Available must be a non-negative integer.";
+        }
         if (!Object.values(input.ownedBlueprints).some(Boolean) && !Object.values(input.ownedKeyGearBlueprints || {}).some(Boolean)) {
           return "Mark at least one owned armor set or key gear blueprint.";
+        }
+        if (!isOwnedPiece(input.targetPiece, input.ownedBlueprints, input.ownedKeyGearBlueprints || {}, input.currentPiece)) {
+          return "The target piece must be owned or already be the current active piece.";
         }
         const hasFragments = CATEGORIES.some(category => {
           const row = input.general[category];
@@ -1211,61 +1690,97 @@
         const inventory = buildInventory(input);
         const ownedArmor = input.ownedBlueprints || {};
         const ownedKeyGear = input.ownedKeyGearBlueprints || {};
-        const currentPiece = input.currentPiece;
-        let activePiece = currentPiece;
+        let activePiece = input.currentPiece;
+        let activeStar = input.currentStar;
+        let activePartial = input.currentXp;
         let countedConversions = 0;
 
         result.best.steps.forEach(step => {
-          const stepPieceMatch = / on (.+)$/.exec(step.title || "");
-          const stepPiece = stepPieceMatch ? stepPieceMatch[1] : activePiece;
+          if (step.currentPiece !== activePiece) {
+            errors.push(`Step current piece mismatch. Expected ${activePiece}, found ${step.currentPiece}.`);
+          }
+          if (step.category !== pieceCategory(step.destinationPiece)) {
+            errors.push(`Step category mismatch on ${step.destinationPiece}.`);
+          }
 
           if (step.conversion) {
             countedConversions += 1;
-            const conversionMatch = /^Convert (.+) -> (.+)$/.exec(step.conversion);
-            if (!conversionMatch) {
-              errors.push(`Malformed conversion text: ${step.conversion}`);
-            } else {
-              const destination = conversionMatch[2];
-              if (destination !== stepPiece) errors.push(`Conversion destination mismatch in ${step.title}.`);
-              if (pieceType(destination) === "set" && destination !== currentPiece && !ownedArmor[destination]) {
-                errors.push(`Unowned armor set conversion destination used: ${destination}`);
-              }
-              if (pieceType(destination) === "key" && destination !== currentPiece && !ownedKeyGear[destination]) {
-                errors.push(`Unowned key gear conversion destination used: ${destination}`);
-              }
+            if (countedConversions > input.conversionAttemptsAvailable) {
+              errors.push("Route used more conversion attempts than available.");
             }
+            if (!isOwnedPiece(step.destinationPiece, ownedArmor, ownedKeyGear, input.currentPiece)) {
+              errors.push(`Unowned conversion destination used: ${step.destinationPiece}`);
+            }
+            if (activePartial > 0) activePartial = 0;
+            activePiece = step.destinationPiece;
+          } else if (step.destinationPiece !== activePiece) {
+            errors.push(`Destination mismatch without conversion on ${step.title}.`);
           }
 
+          let spentXp = 0;
           ["common", "fine", "epic"].forEach(kind => {
             const used = step.usage[kind] || 0;
             if (used > inventory.general[step.category][kind]) errors.push(`${step.category} ${kind} inventory went negative.`);
             inventory.general[step.category][kind] -= used;
+            spentXp += used * (kind === "common" ? 1 : kind === "fine" ? 3 : 10);
           });
 
           step.usage.legendary.forEach(item => {
             const remaining = inventory.legendary.find(entry => entry.name === item.name);
             if (!remaining || remaining.count < item.count) errors.push(`Legendary inventory went negative on ${item.name}.`);
             if (remaining) remaining.count -= item.count;
-            if (item.xpEach === 60 && (item.name !== stepPiece || pieceType(stepPiece) !== "set" || !ownedArmor[stepPiece])) {
-              errors.push(`Illegal 60 XP legendary use on ${item.name} while active piece was ${stepPiece}.`);
+            if (item.xpEach === 60 && (item.name !== activePiece || pieceType(activePiece) !== "set" || !ownedArmor[activePiece])) {
+              errors.push(`Illegal 60 XP legendary use on ${item.name} while active piece was ${activePiece}.`);
             }
+            if (item.xpEach === 30 && item.name === activePiece && pieceType(activePiece) === "set" && ownedArmor[activePiece]) {
+              // Allowed, but record only via spent XP.
+            }
+            spentXp += item.count * item.xpEach;
           });
 
           step.usage.keyGear.forEach(item => {
             const remaining = inventory.keyGear.find(entry => entry.name === item.name);
             if (!remaining || remaining.count < item.count) errors.push(`Key gear inventory went negative on ${item.name}.`);
             if (remaining) remaining.count -= item.count;
-            if (item.xpEach === 60 && (item.name !== stepPiece || pieceType(stepPiece) !== "key" || !ownedKeyGear[stepPiece])) {
-              errors.push(`Illegal 60 XP key gear use on ${item.name} while active piece was ${stepPiece}.`);
+            if (item.xpEach === 60 && (item.name !== activePiece || pieceType(activePiece) !== "key" || !ownedKeyGear[activePiece])) {
+              errors.push(`Illegal 60 XP key gear use on ${item.name} while active piece was ${activePiece}.`);
             }
+            spentXp += item.count * item.xpEach;
           });
 
-          activePiece = stepPiece;
+          if (spentXp !== step.spentXp) {
+            errors.push(`XP mismatch on ${step.title}. Expected ${step.spentXp}, replayed ${spentXp}.`);
+          }
+
+          if (step.progressOnly) {
+            const cap = activeStar >= 6 ? 0 : STAR_COSTS[activeStar] - 1;
+            if (spentXp > cap) errors.push(`Progress step exceeded the next threshold cap on ${step.title}.`);
+            activePartial = spentXp;
+          } else {
+            const required = STAR_COSTS[activeStar] - activePartial;
+            if (spentXp < required) errors.push(`Star jump did not meet required XP on ${step.title}.`);
+            activeStar += 1;
+            activePartial = 0;
+          }
         });
 
-        const expectedConversions = result.best.conversions - ((result.best.finalPiece && result.best.finalPiece !== activePiece) ? 1 : 0);
-        if (countedConversions !== expectedConversions) {
-          errors.push(`Expected ${expectedConversions} path conversions, validated ${countedConversions}.`);
+        if (countedConversions !== result.best.conversions) {
+          errors.push(`Expected ${result.best.conversions} conversions, validated ${countedConversions}.`);
+        }
+        if (activePiece !== result.best.finalPiece) {
+          errors.push(`Final piece mismatch. Expected ${result.best.finalPiece}, replayed ${activePiece}.`);
+        }
+        if (activeStar !== result.best.star) {
+          errors.push(`Final star mismatch. Expected ${result.best.star}, replayed ${activeStar}.`);
+        }
+        if (activePartial !== result.best.partialXp) {
+          errors.push(`Final partial XP mismatch. Expected ${result.best.partialXp}, replayed ${activePartial}.`);
+        }
+        if (result.best.finalPiece !== input.targetPiece) {
+          errors.push("Best result does not end on the selected target piece.");
+        }
+        if (result.best.conversions > input.conversionAttemptsAvailable) {
+          errors.push("Best result exceeded the available conversion attempts.");
         }
 
         return errors;
@@ -1366,6 +1881,92 @@
         `;
       }
 
+      function renderResults(result, input) {
+        const best = result.best;
+        const validated = !validateGeneratedPlan({ best }, input).length;
+        const conversionsRemaining = Math.max(0, input.conversionAttemptsAvailable - best.conversions);
+        const nonTargetWarning = result.bestOverall && result.bestOverall.finalPiece !== input.targetPiece && (
+          result.bestOverall.star > best.star ||
+          (result.bestOverall.star === best.star && result.bestOverall.partialXp > best.partialXp)
+        )
+          ? `A stronger route exists on ${result.bestOverall.finalPiece}, but it cannot finish on ${input.targetPiece} within the available conversion attempts.`
+          : "";
+        const splitUsage = (items, xp) => items.filter(item => item.xpEach === xp).map(item => `${item.count} ${item.name}`).join(", ") || "None";
+
+        const stepsHtml = best.steps.length
+          ? best.steps.map((step, index) => `
+            <div class="step">
+              <h4>Step ${index + 1}: ${esc(step.title)}</h4>
+              <p><strong>Current piece:</strong> ${esc(step.currentPiece)}</p>
+              <p><strong>Destination piece:</strong> ${esc(step.destinationPiece)}</p>
+              <p><strong>Convert:</strong> ${step.conversion ? esc(step.conversion) : "No conversion"}</p>
+              <p><strong>Same-category conversion for 60 XP unlock:</strong> ${step.sameCategoryConversion ? "Yes" : "No"}</p>
+              <p><strong>Star jump:</strong> ${step.progressOnly ? "Partial progress only" : `${step.starFrom}â˜… -> ${step.starTo}â˜…`}</p>
+              <p><strong>Category used:</strong> ${esc(step.category)}</p>
+              <p><strong>Exact fragments spent:</strong> ${esc(usageText(step.usage))}</p>
+              <p><strong>Legendary @ 60 XP:</strong> ${esc(splitUsage(step.usage.legendary, 60))}</p>
+              <p><strong>Legendary @ 30 XP:</strong> ${esc(splitUsage(step.usage.legendary, 30))}</p>
+              <p><strong>Key Gear @ 60 XP:</strong> ${esc(splitUsage(step.usage.keyGear, 60))}</p>
+              <p><strong>Key Gear @ 30 XP:</strong> ${esc(splitUsage(step.usage.keyGear, 30))}</p>
+              <p><strong>Exact XP total spent:</strong> ${step.spentXp}</p>
+              <p><strong>Waste:</strong> ${step.waste}</p>
+              <p><strong>Why this step was chosen:</strong> ${esc(step.why)}</p>
+            </div>
+          `).join("")
+          : `<div class="step"><p class="muted">No valid route found for the selected target piece.</p></div>`;
+
+        const warnings = [...best.warnings, ...(nonTargetWarning ? [nonTargetWarning] : [])];
+        const warningHtml = warnings.length
+          ? `<ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`
+          : `<p class="muted">No conversion warnings for the chosen route.</p>`;
+
+        const alternatives = result.alternatives.length
+          ? `<ul>${result.alternatives
+            .filter(node => !validateGeneratedPlan({ best: node }, input).length)
+            .map(node => `<li>${esc(outcomeText(node))} Waste ${node.totalWaste}, conversions ${node.conversions}, final piece ${esc(node.finalPiece || node.piece)}.</li>`).join("") || "<li>No additional fully validated alternatives.</li>"}</ul>`
+          : `<p class="muted">No close alternative path worth surfacing.</p>`;
+
+        dom.resultsArea.innerHTML = `
+          <div class="summary-grid">
+            <div class="summary-card"><span class="muted">Target Piece Requested</span><strong>${esc(input.targetPiece)}</strong></div>
+            <div class="summary-card"><span class="muted">Final Piece Achieved</span><strong>${esc(best.finalPiece || best.piece)}</strong></div>
+            <div class="summary-card"><span class="muted">Best Valid Result On Target</span><strong>${esc(outcomeText(best))}</strong></div>
+            <div class="summary-card"><span class="muted">6â˜… Possible</span><strong>${best.star >= 6 ? "Yes" : "No"}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Available</span><strong>${input.conversionAttemptsAvailable}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Used</span><strong>${best.conversions}</strong></div>
+            <div class="summary-card"><span class="muted">Conversions Remaining</span><strong>${conversionsRemaining}</strong></div>
+            <div class="summary-card"><span class="muted">Route Validated</span><strong>${validated ? "Yes" : "No"}</strong></div>
+            <div class="summary-card"><span class="muted">Calculation Time</span><strong>${(result.durationMs || 0).toFixed(0)} ms</strong></div>
+          </div>
+          <div class="step">
+            <h4>Compact Summary</h4>
+            <p>${esc(outcomeText(best))}</p>
+            <p><strong>Current piece:</strong> ${esc(input.currentPiece)} at ${input.currentStar}â˜… + ${input.currentXp} / ${STAR_COSTS[input.currentStar]}</p>
+            <p><strong>Target piece:</strong> ${esc(input.targetPiece)}</p>
+            <p><strong>Conversions available / used / remaining:</strong> ${input.conversionAttemptsAvailable} / ${best.conversions} / ${conversionsRemaining}</p>
+            <p><strong>Route validated:</strong> ${validated ? "Yes" : "No"}</p>
+          </div>
+          <h3>Ordered Step-by-Step Path</h3>
+          ${stepsHtml}
+          <div class="step">
+            <h4>Final Recommended Piece</h4>
+            <p>${esc(best.finalPiece || best.piece)}</p>
+          </div>
+          <div class="step">
+            <h4>Remaining Inventory After Plan</h4>
+            ${renderLeftovers(best.inventory)}
+          </div>
+          <div class="step">
+            <h4>Alternative Path Close in Value</h4>
+            ${alternatives}
+          </div>
+          <div class="step">
+            <h4>Warnings</h4>
+            ${warningHtml}
+          </div>
+        `;
+      }
+
       function setPreset(name) {
         const next = blankState();
 
@@ -1373,6 +1974,7 @@
           next.currentPiece = "Lonewolf";
           next.currentStar = 2;
           next.currentXp = 210;
+          next.conversionAttemptsAvailable = 10;
           next.targetPiece = "Savior";
           next.ownedBlueprints = ARMOR_SETS.reduce((acc, set) => (acc[set.name] = true, acc), {});
           next.general.Operator = { epic: 26, fine: 40, common: 55 };
@@ -1393,6 +1995,7 @@
           next.currentPiece = "Treacherous Tides";
           next.currentStar = 3;
           next.currentXp = 180;
+          next.conversionAttemptsAvailable = 6;
           next.targetPiece = "Gravity Tide";
           next.ownedBlueprints = ARMOR_SETS.reduce((acc, set) => (acc[set.name] = ["Treacherous Tides", "Shelterer", "Gravity Tide", "Savior"].includes(set.name), acc), {});
           next.general.Juggernaut = { epic: 6, fine: 15, common: 20 };
@@ -1412,6 +2015,7 @@
           next.currentPiece = "Renegade";
           next.currentStar = 4;
           next.currentXp = 860;
+          next.conversionAttemptsAvailable = 2;
           next.targetPiece = "Sharp Blade Pants";
           next.ownedBlueprints = ARMOR_SETS.reduce((acc, set) => (acc[set.name] = set.name === "Renegade", acc), {});
           next.general.Huntsman = { epic: 58, fine: 14, common: 15 };
@@ -1432,6 +2036,7 @@
         state.currentPiece = ARMOR_SETS[0].name;
         state.currentStar = 1;
         state.currentXp = 0;
+        state.conversionAttemptsAvailable = 18;
         state.discardPartialOnConvert = true;
         state.targetPiece = KEY_GEAR[KEY_GEAR.length - 1].name;
         saveState();
@@ -1449,17 +2054,17 @@
       function clearLegendarySection() {
         state.legendaryRows.forEach(row => {
           row.count = 0;
-          updateLegendaryRow(row.id, true);
         });
         saveState();
+        renderLegendaryTable();
       }
 
       function clearKeySection() {
         state.keyGearRows.forEach(row => {
           row.count = 0;
-          updateKeyRow(row.id, true);
         });
         saveState();
+        renderKeyGearTable();
       }
 
       function clearAll() {
@@ -1507,11 +2112,18 @@
           ${fragmentSources.toString()}
           ${categoryPotential.toString()}
           ${spendForThreshold.toString()}
+          ${spendForProgress.toString()}
           ${usageText.toString()}
-          ${nodeScore.toString()}
           ${compareNode.toString()}
+          ${compareFinalResults.toString()}
+          ${isOwnedPiece.toString()}
           ${canStandOnPiece.toString()}
-          ${finishNode.toString()}
+          ${buildStep.toString()}
+          ${finalizeNodeForPiece.toString()}
+          ${finalizeNodeForTarget.toString()}
+          ${finalizeNodeForAny.toString()}
+          ${queueScore.toString()}
+          ${stateKey.toString()}
           ${searchBestPath.toString()}
           self.onmessage = event => {
             const payload = event.data;
@@ -1539,7 +2151,7 @@
         runStartedAt = performance.now();
         console.time("planner-total");
         console.log("[planner] starting worker search");
-        setCalcState({ running: true, status: "Calculating...", detail: "Starting worker search...", progress: 2, elapsedMs: 0 });
+        setCalcState({ running: true, status: "Calculating...", detail: "Evaluating paths...", progress: 2, elapsedMs: 0 });
         activeWorker.onmessage = event => {
           const message = event.data;
           if (message.type === "progress") {
@@ -1548,7 +2160,32 @@
           }
           if (message.type === "done") {
             console.timeEnd("planner-total");
-            const resultErrors = validateGeneratedPlan(message.result, input);
+            console.log("[planner] worker search finished", message.result);
+            if (!message.result?.best) {
+              setCalcState({
+                running: false,
+                status: "No valid route found",
+                detail: "No fully valid route to the selected target was found with the current inventory and conversion attempts.",
+                progress: 100,
+                elapsedMs: message.result?.durationMs || (performance.now() - runStartedAt)
+              });
+              dom.resultsArea.innerHTML = `<div class="step"><h4>No Valid Route Found</h4><p>The planner could not find a fully valid route that ends on ${esc(input.targetPiece)} with the current inventory, owned blueprints, and conversion attempts.</p></div>`;
+              showMessage("error", "No valid route found for the selected target piece.");
+              activeWorker.terminate();
+              activeWorker = null;
+              return;
+            }
+            let chosen = message.result.best;
+            let resultErrors = validateGeneratedPlan({ best: chosen }, input);
+            console.log("[planner] validating chosen route");
+            if (resultErrors.length) {
+              const fallback = (message.result.alternatives || []).find(node => !validateGeneratedPlan({ best: node }, input).length);
+              if (fallback) {
+                chosen = fallback;
+                resultErrors = [];
+                message.result.best = fallback;
+              }
+            }
             if (resultErrors.length) {
               setCalcState({
                 running: false,
@@ -1591,17 +2228,18 @@
         dom.currentPiece.addEventListener("change", syncTopForm);
         dom.currentStar.addEventListener("change", syncTopForm);
         dom.currentXp.addEventListener("input", syncTopForm);
+        dom.conversionAttempts.addEventListener("input", syncTopForm);
         dom.targetPiece.addEventListener("change", syncTopForm);
         dom.discard.addEventListener("change", syncTopForm);
 
         $("addLegendaryRowBtn").addEventListener("click", () => {
-          state.legendaryRows.push({ id: uid(), setName: ARMOR_SETS[0].name, count: 0 });
+          state.legendaryRows.push({ id: uid(), setName: nextAvailableName(ARMOR_SETS, state.legendaryRows, "setName", ARMOR_SETS[0].name), count: 0 });
           saveState();
           renderLegendaryTable();
         });
 
         $("addKeyGearRowBtn").addEventListener("click", () => {
-          state.keyGearRows.push({ id: uid(), keyName: KEY_GEAR[0].name, count: 0 });
+          state.keyGearRows.push({ id: uid(), keyName: nextAvailableName(KEY_GEAR, state.keyGearRows, "keyName", KEY_GEAR[0].name), count: 0 });
           saveState();
           renderKeyGearTable();
         });
@@ -1669,7 +2307,7 @@
             const row = state.legendaryRows.find(item => item.id === legendarySet);
             if (row) row.setName = event.target.value;
             saveState();
-            updateLegendaryRow(legendarySet, false);
+            renderLegendaryTable();
             return;
           }
 
@@ -1678,7 +2316,7 @@
             const row = state.keyGearRows.find(item => item.id === keyName);
             if (row) row.keyName = event.target.value;
             saveState();
-            updateKeyRow(keyName, false);
+            renderKeyGearTable();
           }
         });
 
@@ -1696,7 +2334,7 @@
             const row = state.legendaryRows.find(item => item.id === clearLegendary);
             if (row) row.count = 0;
             saveState();
-            updateLegendaryRow(clearLegendary, true);
+            renderLegendaryTable();
             return;
           }
 
@@ -1705,7 +2343,25 @@
             const row = state.keyGearRows.find(item => item.id === clearKey);
             if (row) row.count = 0;
             saveState();
-            updateKeyRow(clearKey, true);
+            renderKeyGearTable();
+            return;
+          }
+
+          const deleteLegendary = event.target.getAttribute("data-delete-legendary");
+          if (deleteLegendary) {
+            state.legendaryRows = state.legendaryRows.filter(item => item.id !== deleteLegendary);
+            if (!state.legendaryRows.length) state.legendaryRows = [{ id: uid(), setName: ARMOR_SETS[0].name, count: 0 }];
+            saveState();
+            renderLegendaryTable();
+            return;
+          }
+
+          const deleteKey = event.target.getAttribute("data-delete-key");
+          if (deleteKey) {
+            state.keyGearRows = state.keyGearRows.filter(item => item.id !== deleteKey);
+            if (!state.keyGearRows.length) state.keyGearRows = [{ id: uid(), keyName: KEY_GEAR[0].name, count: 0 }];
+            saveState();
+            renderKeyGearTable();
           }
         });
       }
