@@ -24,6 +24,7 @@ Recent improvements:
 - Piece-level ownership now controls valid conversion destinations and 60 XP matching eligibility
 - Final routes are replay-validated before display and must end on the requested target piece
 - Legendary and key gear fragment dropdowns are grouped by category and prevent duplicate selection
+- Candidate routes are replayed step by step so spent inventory cannot be reused and exact 30/60 XP matching is re-checked before ranking
 
 Run locally:
 1. Open `index.html` in a modern browser.
