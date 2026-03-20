@@ -921,11 +921,7 @@
         return false;
       }
 
-      function spendForThreshold(inventory, category, activePiece, requiredXp, label) {
-        const sources = fragmentSources(inventory, category, activePiece);
-        if (!sources.length) return null;
-
-        const limit = requiredXp + 60;
+      function buildBoundedPseudoItems(sources, limit) {
         const pseudoItems = [];
         sources.forEach((source, sourceIndex) => {
           let remaining = Math.min(source.count, Math.ceil(limit / source.value) + 1);
@@ -944,50 +940,21 @@
             chunk *= 2;
           }
         });
+        return pseudoItems;
+      }
 
-        const dp = new Array(limit + 1).fill(null);
-        dp[0] = { prev: -1, itemIndex: -1, preserve: 0, fragments: 0, order: 0 };
+      function betterSpendMeta(candidate, current) {
+        if (!current) return true;
+        if (candidate.preserve !== current.preserve) return candidate.preserve < current.preserve;
+        if (candidate.order !== current.order) return candidate.order < current.order;
+        if (candidate.fragments !== current.fragments) return candidate.fragments < current.fragments;
+        return false;
+      }
 
-        const better = (a, b) => !b || a.preserve < b.preserve || (a.preserve === b.preserve && (a.fragments < b.fragments || (a.fragments === b.fragments && a.order < b.order)));
-
-        pseudoItems.forEach((item, itemIndex) => {
-          for (let xp = limit; xp >= item.xp; xp -= 1) {
-            const prev = dp[xp - item.xp];
-            if (!prev) continue;
-            const candidate = {
-              prev: xp - item.xp,
-              itemIndex,
-              preserve: prev.preserve + item.preserve,
-              fragments: prev.fragments + item.fragments,
-              order: prev.order + item.order
-            };
-            if (better(candidate, dp[xp])) dp[xp] = candidate;
-          }
-        });
-
-        let bestXp = -1;
-        let bestMeta = null;
-        for (let xp = requiredXp; xp <= limit; xp += 1) {
-          if (!dp[xp]) continue;
-          const waste = xp - requiredXp;
-          if (!bestMeta || waste < bestMeta.waste || (waste === bestMeta.waste && better(dp[xp], bestMeta.meta))) {
-            bestXp = xp;
-            bestMeta = { waste, meta: dp[xp] };
-          }
-        }
-        if (bestXp < 0) return null;
-
-        const picked = new Array(sources.length).fill(0);
-        let cursor = bestXp;
-        while (cursor > 0) {
-          const entry = dp[cursor];
-          const item = pseudoItems[entry.itemIndex];
-          picked[item.sourceIndex] += item.count;
-          cursor = entry.prev;
-        }
-
+      function applyPickedSpend(inventory, category, sources, picked) {
         const nextInventory = clone(inventory);
         const usage = { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] };
+
         sources.forEach((source, sourceIndex) => {
           const used = picked[sourceIndex] || 0;
           if (!used) return;
@@ -1009,14 +976,74 @@
         nextInventory.legendary = nextInventory.legendary.filter(item => item.count > 0);
         nextInventory.keyGear = nextInventory.keyGear.filter(item => item.count > 0);
 
+        return { nextInventory, usage };
+      }
+
+      function spendForThreshold(inventory, category, activePiece, requiredXp, label) {
+        const sources = fragmentSources(inventory, category, activePiece);
+        if (!sources.length) return null;
+
+        const limit = requiredXp + 60;
+        const pseudoItems = buildBoundedPseudoItems(sources, limit);
+
+        const dp = new Array(limit + 1).fill(null);
+        dp[0] = { prev: -1, itemIndex: -1, preserve: 0, fragments: 0, order: 0 };
+
+        pseudoItems.forEach((item, itemIndex) => {
+          for (let xp = limit; xp >= item.xp; xp -= 1) {
+            const prev = dp[xp - item.xp];
+            if (!prev) continue;
+            const candidate = {
+              prev: xp - item.xp,
+              itemIndex,
+              preserve: prev.preserve + item.preserve,
+              fragments: prev.fragments + item.fragments,
+              order: prev.order + item.order
+            };
+            if (betterSpendMeta(candidate, dp[xp])) dp[xp] = candidate;
+          }
+        });
+
+        let bestXp = -1;
+        let bestMeta = null;
+        let foundExact = false;
+        for (let xp = requiredXp; xp <= limit; xp += 1) {
+          if (!dp[xp]) continue;
+          const waste = xp - requiredXp;
+          const exact = waste === 0;
+          if (
+            !bestMeta ||
+            (exact && !foundExact) ||
+            (exact === foundExact && (waste < bestMeta.waste || (waste === bestMeta.waste && betterSpendMeta(dp[xp], bestMeta.meta))))
+          ) {
+            bestXp = xp;
+            bestMeta = { waste, meta: dp[xp] };
+            foundExact = exact;
+          }
+        }
+        if (bestXp < 0) return null;
+
+        const picked = new Array(sources.length).fill(0);
+        let cursor = bestXp;
+        while (cursor > 0) {
+          const entry = dp[cursor];
+          const item = pseudoItems[entry.itemIndex];
+          picked[item.sourceIndex] += item.count;
+          cursor = entry.prev;
+        }
+        const applied = applyPickedSpend(inventory, category, sources, picked);
+
         return {
-          nextInventory,
-          usage,
+          nextInventory: applied.nextInventory,
+          usage: applied.usage,
           spentXp: bestXp,
           waste: bestMeta.waste,
+          // The bounded step solver prefers exact threshold hits first, then lowest waste.
+          // Only after that does it preserve 60 XP matches and prefer lower-tier adjustment
+          // fragments, which keeps Common and Fine fragments relevant without brute force.
           why: bestMeta.waste === 0
-            ? `${label} hit the exact threshold while preserving stronger match-value fragments where possible.`
-            : `${label} needed ${bestMeta.waste} wasted XP because no exact legal threshold combination existed.`
+            ? `${label} hit the exact threshold first, while preserving stronger 60 XP matches and using lower-tier fragments as adjustment tools where helpful.`
+            : `${label} used the lowest-waste legal threshold combination after checking bounded exact-fit options, while still preserving stronger 60 XP matches where possible.`
         };
       }
 
@@ -1250,29 +1277,10 @@
         const sources = fragmentSources(inventory, category, activePiece);
         if (!sources.length) return null;
         const limit = maxXp;
-        const pseudoItems = [];
-
-        sources.forEach((source, sourceIndex) => {
-          let remaining = Math.min(source.count, Math.ceil(limit / source.value) + 1);
-          let chunk = 1;
-          while (remaining > 0) {
-            const used = Math.min(chunk, remaining);
-            pseudoItems.push({
-              sourceIndex,
-              count: used,
-              xp: used * source.value,
-              preserve: used * source.preserveRank,
-              fragments: used,
-              order: used * source.spendRank
-            });
-            remaining -= used;
-            chunk *= 2;
-          }
-        });
+        const pseudoItems = buildBoundedPseudoItems(sources, limit);
 
         const dp = new Array(limit + 1).fill(null);
         dp[0] = { prev: -1, itemIndex: -1, preserve: 0, fragments: 0, order: 0 };
-        const better = (a, b) => !b || a.preserve < b.preserve || (a.preserve === b.preserve && (a.fragments < b.fragments || (a.fragments === b.fragments && a.order < b.order)));
 
         pseudoItems.forEach((item, itemIndex) => {
           for (let xp = limit; xp >= item.xp; xp -= 1) {
@@ -1285,7 +1293,7 @@
               fragments: prev.fragments + item.fragments,
               order: prev.order + item.order
             };
-            if (better(candidate, dp[xp])) dp[xp] = candidate;
+            if (betterSpendMeta(candidate, dp[xp])) dp[xp] = candidate;
           }
         });
 
@@ -1293,7 +1301,7 @@
         let bestMeta = dp[0];
         for (let xp = 1; xp <= limit; xp += 1) {
           if (!dp[xp]) continue;
-          if (xp > bestXp || (xp === bestXp && better(dp[xp], bestMeta))) {
+          if (xp > bestXp || (xp === bestXp && betterSpendMeta(dp[xp], bestMeta))) {
             bestXp = xp;
             bestMeta = dp[xp];
           }
@@ -1307,37 +1315,15 @@
           picked[item.sourceIndex] += item.count;
           cursor = entry.prev;
         }
-
-        const nextInventory = clone(inventory);
-        const usage = { common: 0, fine: 0, epic: 0, legendary: [], keyGear: [] };
-        sources.forEach((source, sourceIndex) => {
-          const used = picked[sourceIndex] || 0;
-          if (!used) return;
-          if (source.kind === "general") {
-            if (source.label === "Common") nextInventory.general[category].common -= used, usage.common += used;
-            if (source.label === "Fine") nextInventory.general[category].fine -= used, usage.fine += used;
-            if (source.label === "Epic") nextInventory.general[category].epic -= used, usage.epic += used;
-          } else if (source.kind === "legendary") {
-            const item = nextInventory.legendary.find(entry => `legendary:${entry.id}` === source.id);
-            if (item) item.count -= used;
-            usage.legendary.push({ name: source.label, count: used, xpEach: source.value });
-          } else {
-            const item = nextInventory.keyGear.find(entry => `key:${entry.id}` === source.id);
-            if (item) item.count -= used;
-            usage.keyGear.push({ name: source.label, count: used, xpEach: source.value });
-          }
-        });
-
-        nextInventory.legendary = nextInventory.legendary.filter(item => item.count > 0);
-        nextInventory.keyGear = nextInventory.keyGear.filter(item => item.count > 0);
+        const applied = applyPickedSpend(inventory, category, sources, picked);
 
         return {
-          nextInventory,
-          usage,
+          nextInventory: applied.nextInventory,
+          usage: applied.usage,
           spentXp: bestXp,
           waste: 0,
           why: bestXp > 0
-            ? `${label} spent exact remaining inventory for the best legal progress without crossing the next threshold.`
+            ? `${label} took the highest legal progress below the next threshold while preserving stronger 60 XP matches and favoring lower-tier adjustment fragments on ties.`
             : `${label} could not spend any legal XP without crossing the next threshold.`
         };
       }
@@ -2270,16 +2256,6 @@
         `;
       }
 
-      function formatInventorySnapshot(snapshot) {
-        const general = CATEGORIES.map(category => {
-          const row = snapshot.general[category];
-          return `${category}: ${row.epic} epic, ${row.fine} fine, ${row.common} common`;
-        }).join(" | ");
-        const legendary = snapshot.legendary.length ? snapshot.legendary.map(item => `${item.name} (${item.count})`).join(", ") : "None";
-        const keyGear = snapshot.keyGear.length ? snapshot.keyGear.map(item => `${item.name} (${item.count})`).join(", ") : "None";
-        return `General: ${general}\nLegendary: ${legendary}\nKey Gear: ${keyGear}`;
-      }
-
       function renderResults(result, input) {
         const best = result.best;
         const replay = best.validation || replayRouteCandidate(best, input);
@@ -2291,7 +2267,13 @@
         )
           ? `A stronger route exists on ${result.bestOverall.finalPiece}, but it cannot finish on ${input.targetPiece} within the available conversion attempts.`
           : "";
-        const splitUsage = (items, xp) => items.filter(item => item.xpEach === xp).map(item => `${item.count} ${item.name}`).join(", ") || "None";
+        const splitUsage = (step, xp) => {
+          const items = [
+            ...step.usage.legendary.filter(item => item.xpEach === xp).map(item => `${item.count} ${item.name} legendary`),
+            ...step.usage.keyGear.filter(item => item.xpEach === xp).map(item => `${item.count} ${item.name} key gear`)
+          ];
+          return items.join(", ") || "None";
+        };
 
         const stepsHtml = replay.steps.length
           ? replay.steps.map((step, index) => `
@@ -2303,15 +2285,11 @@
               <p><strong>Same-category conversion for 60 XP unlock:</strong> ${step.sameCategoryConversion ? "Yes" : "No"}</p>
               <p><strong>Star jump:</strong> ${step.progressOnly ? "Partial progress only" : `${step.starFrom}â˜… -> ${step.starTo}â˜…`}</p>
               <p><strong>Category used:</strong> ${esc(step.category)}</p>
-              <p><strong>Inventory before step:</strong><br><pre>${esc(formatInventorySnapshot(step.inventoryBefore))}</pre></p>
               <p><strong>Exact fragments spent:</strong> ${esc(usageText(step.usage))}</p>
-              <p><strong>Legendary @ 60 XP exact match:</strong> ${esc(splitUsage(step.usage.legendary, 60))}</p>
-              <p><strong>Legendary @ 30 XP non-match:</strong> ${esc(splitUsage(step.usage.legendary, 30))}</p>
-              <p><strong>Key Gear @ 60 XP exact match:</strong> ${esc(splitUsage(step.usage.keyGear, 60))}</p>
-              <p><strong>Key Gear @ 30 XP non-match:</strong> ${esc(splitUsage(step.usage.keyGear, 30))}</p>
+              <p><strong>Fragments that got 60 XP:</strong> ${esc(splitUsage(step, 60))}</p>
+              <p><strong>Fragments that got 30 XP:</strong> ${esc(splitUsage(step, 30))}</p>
               <p><strong>Exact XP total spent:</strong> ${step.spentXp}</p>
               <p><strong>Waste:</strong> ${step.waste}</p>
-              <p><strong>Inventory after step:</strong><br><pre>${esc(formatInventorySnapshot(step.inventoryAfter))}</pre></p>
               <p><strong>Why this step was chosen:</strong> ${esc(step.why)}</p>
             </div>
           `).join("")
